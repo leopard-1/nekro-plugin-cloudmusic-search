@@ -1,14 +1,17 @@
 [project]
-name = "nekro-plugin-template"
+name = "nekro-plugin-cloudmusic-search"
 version = "2.0.0"
-description = "NekroAgent 插件模板"
-authors = [{ name = "KroMiose", email = "li_xiangff@163.com" }]
+description = "NekroAgent 网易云音乐搜索插件"
+authors = [{ name = "Sakuralis", email = "li_xiangff@163.com" }]
 readme = "README.md"
 requires-python = ">=3.10,<3.12"
-dependencies = ["nekro-agent>=2.0.0"]
+dependencies = [
+    "nekro-agent>=2.0.0",
+    "pyncm>=1.8.1",
+]
 
 [project.urls]
-Repository = "https://github.com/KroMiose/nekro-plugin-template"
+Repository = "https://github.com/Sakuralis/nekro-plugin-cloudmusic-search"
 
 
 [build-system]
