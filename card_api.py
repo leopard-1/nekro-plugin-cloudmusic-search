@@ -59,18 +59,18 @@ async def get_signed_netease_card(
         
         api_url = "https://oiapi.net/api/QQMusicJSONArk"
         
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             resp = await client.post(api_url, data=data)
             if resp.status_code == 200:
                 resp_json = resp.json()
                 if resp_json.get("code") == 1 and resp_json.get("message"):
                     logger.info("获取网易云音乐卡片成功")
                     return resp_json["message"]
-                logger.warning(f"获取卡片失败: {resp_json}")
+                logger.warning(f"获取网易云音乐 JSON 卡片签名失败，接口返回: {resp_json}")
             else:
-                logger.warning(f"卡片API请求失败: {resp.status_code}")
+                logger.warning(f"网易云音乐 JSON 卡片签名 API 请求失败: HTTP {resp.status_code}, {resp.text[:200]}")
     except Exception as e:
-        logger.warning(f"获取卡片出错: {e}")
+        logger.warning(f"获取网易云音乐 JSON 卡片签名出错: {e}")
     
     return None
 

@@ -81,9 +81,9 @@ class NetEaseCloudMusicConfig(ConfigBase):
     )
 
     MAX_SEARCH_RESULTS: int = Field(
-        15,
+        20,
         title="最大搜索结果数",
-        description="歌曲或专辑列表显示数量，最多 20 条。",
+        description="歌曲或专辑列表显示数量，最多 20 条。搜索后可用编号播放或下载。",
         ge=1,
         le=20,
     )
@@ -108,6 +108,12 @@ class NetEaseCloudMusicConfig(ConfigBase):
         description="OneBot v11 下优先发送网易云音乐 JSON 卡片，失败后降级为文字、封面和语音。",
     )
 
+    CARD_FALLBACK_MODE: str = Field(
+        "voice",
+        title="卡片失败降级模式",
+        description="JSON 卡片不可用时的降级方式：voice 发送语音，text 只发文字链接，none 不降级。",
+    )
+
     COVER_SIZE: int = Field(
         500,
         title="封面尺寸",
@@ -126,6 +132,7 @@ class NetEaseCloudMusicConfig(ConfigBase):
 
 
 config = plugin.get_config(NetEaseCloudMusicConfig)
+_last_song_results: dict[str, list[SongInfo]] = {}
 
 
 def _session_error() -> str | None:
@@ -133,7 +140,12 @@ def _session_error() -> str | None:
 
 
 def _result_limit() -> int:
-    return max(1, min(int(config.MAX_SEARCH_RESULTS or 15), 20))
+    return max(1, min(int(config.MAX_SEARCH_RESULTS or 20), 20))
+
+
+def _fallback_mode() -> str:
+    mode = (config.CARD_FALLBACK_MODE or "voice").strip().lower()
+    return mode if mode in {"voice", "text", "none"} else "voice"
 
 
 def _output_mode(raw: str = "") -> str:
@@ -195,7 +207,7 @@ def _extract_quality(raw_text: str) -> tuple[str, str]:
 def _format_songs(title: str, songs: list[SongInfo]) -> str:
     if not songs:
         return f"{title}\n\n没有找到歌曲。"
-    lines = [title, ""]
+    lines = [title, "", "可用 /cm_play 编号 播放，或 /cm_download 编号 下载。", ""]
     for index, song in enumerate(songs, start=1):
         lines.append(f"{index}. {song.name} - {song.artist}")
         lines.append(f"   专辑：{song.album} | 时长：{format_duration(song.duration)} | ID：{song.id}")
@@ -215,7 +227,7 @@ def _format_albums(title: str, albums: list[AlbumInfo]) -> str:
 
 def _format_artist_result(result: ArtistSearchResult) -> str:
     lines = [f"网易云歌手相关搜索 | {result.keyword}", ""]
-    lines.append("相关歌曲：")
+    lines.append("相关歌曲（可用 /cm_play 编号 播放）：")
     for index, song in enumerate(result.songs, start=1):
         lines.append(f"{index}. {song.name} - {song.artist} | {song.album} | ID：{song.id}")
     if not result.songs:
@@ -257,11 +269,22 @@ async def _send_search_result(
     return text
 
 
-def _parse_song_id(raw_text: str) -> int:
+def _remember_song_results(chat_key: str, songs: list[SongInfo]) -> None:
+    if songs:
+        _last_song_results[chat_key] = songs[:20]
+
+
+def _parse_song_id(raw_text: str, chat_key: str = "") -> int:
     first = (raw_text or "").split(maxsplit=1)[0] if raw_text else ""
     if not first.isdigit():
-        raise ValueError("请输入有效的歌曲 ID。")
-    return int(first)
+        raise ValueError("请输入有效的歌曲编号或歌曲 ID。")
+    value = int(first)
+    cached = _last_song_results.get(chat_key, [])
+    if 1 <= value <= len(cached):
+        return cached[value - 1].id
+    if value <= 20 and cached:
+        raise ValueError(f"最近一次搜索只有 {len(cached)} 条结果，无法选择编号 {value}。")
+    return value
 
 
 async def _download_audio_file(song_id: int, quality: str) -> tuple[Path, str, str]:
@@ -302,6 +325,7 @@ async def search_songs(ctx: AgentCtx, keyword: str, output_mode: str = "") -> st
     if error:
         return error
     songs = search_songs_from_ncm(keyword.strip(), _result_limit(), config.DEFAULT_COVER_URL)
+    _remember_song_results(ctx.chat_key, songs)
     title = f"网易云歌曲搜索 | {keyword.strip()}"
     text = _format_songs(title, songs)
     await _send_search_result(ctx, title, text, songs, _output_mode(output_mode))
@@ -317,6 +341,7 @@ async def search_artist_music(ctx: AgentCtx, artist: str, output_mode: str = "")
     if error:
         return error
     result = search_artist_music_from_ncm(artist.strip(), _result_limit(), config.DEFAULT_COVER_URL)
+    _remember_song_results(ctx.chat_key, result.songs)
     title = f"网易云歌手搜索 | {artist.strip()}"
     text = _format_artist_result(result)
     await _send_search_result(ctx, title, text, [*result.songs, *result.albums], _output_mode(output_mode))
@@ -330,6 +355,7 @@ async def get_album(ctx: AgentCtx, album_id: int, output_mode: str = "") -> str:
     if error:
         return error
     detail = get_album_detail(album_id, config.DEFAULT_COVER_URL, max_songs=20)
+    _remember_song_results(ctx.chat_key, detail.songs)
     title = f"网易云专辑 | {detail.album.name}"
     text = "\n".join(
         [
@@ -401,7 +427,24 @@ async def play_song(ctx: AgentCtx, song_id: int, quality: str = "") -> str:
     if card_sent:
         return f"歌曲《{song_name}》卡片已发送，音质：{audio.quality}"
 
+    if config.ENABLE_JSON_CARD:
+        plugin.logger.warning(
+            f"网易云音乐 JSON 卡片未发送成功，按 CARD_FALLBACK_MODE={_fallback_mode()} 降级处理",
+        )
+
+    fallback_mode = _fallback_mode()
+    if fallback_mode == "none":
+        return f"歌曲《{song_name}》卡片发送失败，已按配置不降级发送。"
+
     message_text = f"{song_name} - {artist_name}\n音质：{audio.quality}"
+    if fallback_mode == "text":
+        message_text = f"{message_text}\n网易云链接：https://music.163.com/#/song?id={song_id}\n音频链接：{audio.url}"
+        if chat_type == "private":
+            await bot.call_api("send_private_msg", user_id=target_id, message=message_text)
+        else:
+            await bot.call_api("send_group_msg", group_id=target_id, message=message_text)
+        return f"歌曲《{song_name}》卡片发送失败，已发送文字链接。"
+
     if chat_type == "private":
         await bot.call_api("send_private_msg", user_id=target_id, message=message_text)
     else:
@@ -452,8 +495,8 @@ async def cm_help_cmd(_context: CommandExecutionContext) -> CommandResponse:
                 "/cm_search <关键词> [text|image] - 搜索歌曲",
                 "/cm_artist <歌手> [text|image] - 按歌手搜索相关歌曲和专辑，最多各 20 条",
                 "/cm_album <专辑ID或关键词> [text|image] - 获取专辑详情或搜索专辑",
-                "/cm_play <歌曲ID> [standard|higher|lossless] - 播放歌曲，命令音质优先于配置",
-                "/cm_download <歌曲ID> [standard|higher|lossless] - 下载并发送 mp3/wav 文件，ncm 会跳过",
+                "/cm_play <编号或歌曲ID> [standard|higher|lossless] - 播放歌曲，命令音质优先于配置",
+                "/cm_download <编号或歌曲ID> [standard|higher|lossless] - 下载并发送 mp3/wav 文件，ncm 会跳过",
                 "",
                 "配置项：NCM_COOKIE、DEFAULT_QUALITY、SEARCH_OUTPUT_MODE、IMAGE_BACKGROUND_URL、FONT_PATH 等。",
             ],
@@ -557,8 +600,8 @@ async def cm_play_cmd(
 ) -> CommandResponse:
     try:
         cleaned_query, quality = _extract_quality(query)
-        song_id = _parse_song_id(cleaned_query)
         ctx = await AgentCtx.create_by_chat_key(context.chat_key)
+        song_id = _parse_song_id(cleaned_query, ctx.chat_key)
         text = await play_song(ctx, song_id, quality)
         return CmdCtl.success(text)
     except Exception as e:
@@ -580,8 +623,8 @@ async def cm_download_cmd(
 ) -> CommandResponse:
     try:
         cleaned_query, quality = _extract_quality(query)
-        song_id = _parse_song_id(cleaned_query)
         ctx = await AgentCtx.create_by_chat_key(context.chat_key)
+        song_id = _parse_song_id(cleaned_query, ctx.chat_key)
         text = await download_song(ctx, song_id, quality)
         return CmdCtl.success(text)
     except Exception as e:
