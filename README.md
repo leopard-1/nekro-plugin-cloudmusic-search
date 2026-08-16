@@ -16,7 +16,7 @@ Nekro-Agent 网易云音乐点歌插件，支持歌曲搜索、歌手相关搜�
 ## 配置
 
 - `NCM_COOKIE`：网易云音乐 Cookie，建议包含 `MUSIC_U` 和 `__csrf`
-- `DEFAULT_QUALITY`：默认音质，支持 `standard`、`higher`、`lossless`
+- `DEFAULT_QUALITY`：默认音质，支持 `standard`、`higher`、`exhigh`、`lossless`、`hires`
 - `SEARCH_OUTPUT_MODE`：搜索结果输出模式，`text` 或 `image`
 - `IMAGE_BACKGROUND_URL`：搜索结果图片背景 URL
 - `FONT_PATH`：图片字体路径，支持 ttf/ttc
@@ -40,6 +40,7 @@ Nekro-Agent 网易云音乐点歌插件，支持歌曲搜索、歌手相关搜�
 /cm_album 35327877
 /cm_album 叶惠美 image
 /cm_play 186016 standard
+/cm_play 186016 exhigh
 /cm_play 186016 lossless
 /cm_download 186016 higher
 ```
@@ -50,7 +51,9 @@ Nekro-Agent 网易云音乐点歌插件，支持歌曲搜索、歌手相关搜�
 
 - `standard`：标准
 - `higher`：较高
+- `exhigh`：极高
 - `lossless`：无损
+- `hires`：Hi-Res
 
 命令里的音质优先于配置项。例如 `DEFAULT_QUALITY=lossless` 时，用户发送 `/cm_play 186016 standard` 会按 `standard` 请求。
 
@@ -96,4 +99,4 @@ fonts/font.ttf
 
 ## 说明
 
-插件运行时会通过 Nekro-Agent 的动态依赖能力安装 `pyncm`。本插件仅供学习交流使用，请遵守音乐版权相关法律法规。
+插件运行时会通过 Nekro-Agent 的动态依赖能力安装 `NeteaseCloudMusic` SDK。该 SDK 基于 NeteaseCloudMusicApi 封装。本插件仅供学习交流使用，请遵守音乐版权相关法律法规。

@@ -22,7 +22,7 @@ from .card_api import get_cover_url, get_signed_netease_card
 from .image_gen import generate_result_image
 from .models import AlbumInfo, ArtistSearchResult, SongInfo
 from .ncm_api import (
-    cleanup_pyncm_session,
+    cleanup_ncm_session,
     ensure_session_initialized,
     get_album_detail,
     get_song_audio_info,
@@ -59,7 +59,7 @@ class NetEaseCloudMusicConfig(ConfigBase):
     DEFAULT_QUALITY: str = Field(
         "lossless",
         title="默认音质",
-        description="默认请求音质：standard / higher / lossless。用户会话或命令中指定音质时优先生效。",
+        description="默认请求音质：standard / higher / exhigh / lossless / hires。用户会话或命令中指定音质时优先生效。",
     )
 
     SEARCH_OUTPUT_MODE: str = Field(
@@ -184,13 +184,17 @@ def _extract_quality(raw_text: str) -> tuple[str, str]:
         "hq",
         "lossless",
         "flac",
+        "exhigh",
+        "extreme",
+        "hires",
+        "hi-res",
         "标准",
         "普通",
         "较高",
         "高",
         "高音质",
-        "无损",
         "极高",
+        "无损",
     }
     for token in tokens:
         lower = token.lower()
@@ -495,8 +499,8 @@ async def cm_help_cmd(_context: CommandExecutionContext) -> CommandResponse:
                 "/cm_search <关键词> [text|image] - 搜索歌曲",
                 "/cm_artist <歌手> [text|image] - 按歌手搜索相关歌曲和专辑，最多各 20 条",
                 "/cm_album <专辑ID或关键词> [text|image] - 获取专辑详情或搜索专辑",
-                "/cm_play <编号或歌曲ID> [standard|higher|lossless] - 播放歌曲，命令音质优先于配置",
-                "/cm_download <编号或歌曲ID> [standard|higher|lossless] - 下载并发送 mp3/wav 文件，ncm 会跳过",
+                "/cm_play <编号或歌曲ID> [standard|higher|exhigh|lossless|hires] - 播放歌曲，命令音质优先于配置",
+                "/cm_download <编号或歌曲ID> [standard|higher|exhigh|lossless|hires] - 下载并发送 mp3/wav 文件，ncm 会跳过",
                 "",
                 "配置项：NCM_COOKIE、DEFAULT_QUALITY、SEARCH_OUTPUT_MODE、IMAGE_BACKGROUND_URL、FONT_PATH 等。",
             ],
@@ -590,7 +594,7 @@ async def cm_album_cmd(
     name="cm_play",
     description="播放网易云歌曲",
     aliases=["播放歌曲", "放歌"],
-    usage="/cm_play <歌曲ID> [standard|higher|lossless]",
+    usage="/cm_play <歌曲ID> [standard|higher|exhigh|lossless|hires]",
     permission=CommandPermission.PUBLIC,
     category="音乐",
 )
@@ -613,7 +617,7 @@ async def cm_play_cmd(
     name="cm_download",
     description="下载并发送网易云歌曲文件",
     aliases=["下载歌曲", "发歌曲文件"],
-    usage="/cm_download <歌曲ID> [standard|higher|lossless]",
+    usage="/cm_download <歌曲ID> [standard|higher|exhigh|lossless|hires]",
     permission=CommandPermission.PUBLIC,
     category="音乐",
 )
@@ -635,4 +639,4 @@ async def cm_download_cmd(
 @plugin.mount_cleanup_method()
 async def cleanup():
     """清理插件资源"""
-    cleanup_pyncm_session()
+    cleanup_ncm_session()
