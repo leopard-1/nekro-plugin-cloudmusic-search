@@ -1,6 +1,6 @@
 """网易云音乐 API 封装"""
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from nekro_agent.api.plugin import dynamic_import_pkg
@@ -8,28 +8,64 @@ from nekro_agent.core import logger
 
 from .models import AlbumDetail, AlbumInfo, ArtistSearchResult, AudioDownloadInfo, SongInfo
 
-# 类型检查时导入
-if TYPE_CHECKING:
-    import pyncm
-    from pyncm import GetCurrentSession, Session, SetCurrentSession
-    from pyncm.apis import album, cloudsearch, track
-
-# 运行时动态导入
-pyncm = dynamic_import_pkg(
-    "pyncm==1.8.1",
-    import_name="pyncm",
-    mirror="https://pypi.com.cn/simple",
-)
-
-# 导入后需要显式导入子模块
-from pyncm import GetCurrentSession, Session, SetCurrentSession
-from pyncm.apis import album, cloudsearch, track
+pyncm = None
+Session = None
+SetCurrentSession = None
+cloudsearch = None
+track = None
+album = None
 
 # 会话管理状态
 _session_state = {
     "initialized": False,
     "last_cookie": None,
+    "load_error": None,
 }
+
+
+def _load_pyncm() -> Optional[str]:
+    """懒加载 pyncm，避免插件加载阶段因包源不可用而整体失败"""
+    global pyncm, Session, SetCurrentSession, cloudsearch, track, album
+
+    if pyncm and Session and SetCurrentSession and cloudsearch and track and album:
+        return None
+
+    attempts = [
+        ("pyncm", "https://pypi.com.cn/simple"),
+        ("pyncm==1.8.1", "https://pypi.com.cn/simple"),
+        ("pyncm", "https://pypi.org/simple"),
+        ("pyncm==1.8.1", "https://pypi.org/simple"),
+    ]
+    errors: list[str] = []
+    for package_spec, mirror in attempts:
+        try:
+            pyncm = dynamic_import_pkg(
+                package_spec,
+                import_name="pyncm",
+                mirror=mirror,
+                timeout=180,
+            )
+            from pyncm import Session as ImportedSession
+            from pyncm import SetCurrentSession as ImportedSetCurrentSession
+            from pyncm.apis import album as imported_album
+            from pyncm.apis import cloudsearch as imported_cloudsearch
+            from pyncm.apis import track as imported_track
+
+            Session = ImportedSession
+            SetCurrentSession = ImportedSetCurrentSession
+            cloudsearch = imported_cloudsearch
+            track = imported_track
+            album = imported_album
+            _session_state["load_error"] = None
+            logger.info(f"pyncm 加载成功: {package_spec} @ {mirror}")
+            return None
+        except Exception as e:
+            errors.append(f"{package_spec} @ {mirror}: {e}")
+            logger.warning(f"pyncm 加载失败: {package_spec} @ {mirror}: {e}")
+
+    error = "pyncm 安装或导入失败。请检查容器网络/PyPI 镜像，或在容器内预先安装 pyncm。"
+    _session_state["load_error"] = f"{error}\n" + "\n".join(errors[-2:])
+    return str(_session_state["load_error"])
 
 
 def parse_cookie_string(cookie_string: str) -> Dict[str, str]:
@@ -134,6 +170,11 @@ def ensure_session_initialized(cookie_string: str) -> Optional[str]:
     if not cookie_string or not cookie_string.strip():
         _session_state["initialized"] = False
         return "未配置网易云音乐Cookie，请在插件配置中填写完整的Cookie字符串"
+
+    load_error = _load_pyncm()
+    if load_error:
+        _session_state["initialized"] = False
+        return load_error
     
     # 检查配置是否变更
     if _session_state["initialized"] and _session_state["last_cookie"] == cookie_string:
@@ -191,6 +232,10 @@ def search_songs_from_ncm(
     Raises:
         ValueError: 搜索无结果
     """
+    load_error = _load_pyncm()
+    if load_error:
+        raise RuntimeError(load_error)
+
     # 调用 pyncm API 搜索。pyncm 参数名是 type，不是 stype。
     search_result = cloudsearch.GetSearchResult(
         keyword,
@@ -226,6 +271,10 @@ def search_albums_from_ncm(
     default_cover_url: str,
 ) -> List[AlbumInfo]:
     """从网易云音乐搜索专辑"""
+    load_error = _load_pyncm()
+    if load_error:
+        raise RuntimeError(load_error)
+
     search_result = cloudsearch.GetSearchResult(
         keyword,
         type=cloudsearch.TYPE_ALBUM,
@@ -280,6 +329,10 @@ def get_song_detail(song_id: int) -> Dict[str, Any]:
     Raises:
         ValueError: 歌曲不存在
     """
+    load_error = _load_pyncm()
+    if load_error:
+        raise RuntimeError(load_error)
+
     track_details_result = track.GetTrackDetail([song_id])
     # pyncm 返回的类型不固定，这里做类型断言
     if isinstance(track_details_result, dict):
@@ -300,6 +353,10 @@ def get_song_detail(song_id: int) -> Dict[str, Any]:
 
 def get_album_detail(album_id: int, default_cover_url: str, max_songs: int = 20) -> AlbumDetail:
     """获取专辑详情"""
+    load_error = _load_pyncm()
+    if load_error:
+        raise RuntimeError(load_error)
+
     result = album.GetAlbumInfo(str(album_id))
     if not isinstance(result, dict):
         raise ValueError(f"未找到专辑ID {album_id}")
@@ -323,6 +380,10 @@ def get_album_detail(album_id: int, default_cover_url: str, max_songs: int = 20)
 
 def get_song_audio_info(song_id: int, quality: str, default_quality: str = "lossless") -> AudioDownloadInfo:
     """获取指定音质的歌曲音频 URL"""
+    load_error = _load_pyncm()
+    if load_error:
+        raise RuntimeError(load_error)
+
     normalized_quality = normalize_quality(quality, default_quality)
     result = track.GetTrackAudio([song_id], quality=normalized_quality, encodeType="mp3")
     if not isinstance(result, dict):
@@ -353,6 +414,8 @@ def get_song_audio_info(song_id: int, quality: str, default_quality: str = "loss
 def cleanup_pyncm_session():
     """清理pyncm会话"""
     if _session_state["initialized"]:
+        if _load_pyncm():
+            return
         empty_session = Session()
         SetCurrentSession(empty_session)
         _session_state["initialized"] = False
