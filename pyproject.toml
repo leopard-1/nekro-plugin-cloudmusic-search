@@ -7,7 +7,8 @@ readme = "README.md"
 requires-python = ">=3.10,<3.12"
 dependencies = [
     "nekro-agent>=2.0.0",
-    "pyncm>=1.8.1",
+    "httpx>=0.27.0",
+    "pillow>=10.0.0",
 ]
 
 [project.urls]
@@ -20,7 +21,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]
-only-include = ["__init__.py"]
+only-include = [
+    "__init__.py",
+    "card_api.py",
+    "image_gen.py",
+    "models.py",
+    "ncm_api.py",
+    "utils.py",
+]
 
 
 [tool.black]

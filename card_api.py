@@ -6,18 +6,6 @@ import httpx
 from nekro_agent.core import logger
 
 
-async def get_song_play_url(song_id: int) -> str:
-    """获取歌曲播放链接
-    
-    Args:
-        song_id: 歌曲ID
-        
-    Returns:
-        播放链接
-    """
-    return f"https://music.163.com/song/media/outer/url?id={song_id}.mp3"
-
-
 async def get_cover_url(song_detail: dict, size: int = 500) -> Optional[str]:
     """获取歌曲封面URL
     
