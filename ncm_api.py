@@ -1,6 +1,7 @@
 """网易云音乐 API 封装，基于 NeteaseCloudMusic Python SDK。"""
 
 import time
+from importlib import import_module
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -26,11 +27,28 @@ def _load_sdk() -> Optional[str]:
     if NeteaseCloudMusicApi:
         return None
 
+    try:
+        module = import_module("NeteaseCloudMusic")
+        NeteaseCloudMusicApi = module.NeteaseCloudMusicApi
+        _session_state["load_error"] = None
+        logger.info("NeteaseCloudMusic SDK 已在当前环境中可用")
+        return None
+    except Exception as e:
+        logger.debug(f"直接导入 NeteaseCloudMusic 失败，将尝试动态安装: {e}")
+
+    try:
+        dynamic_import_pkg(
+            "setuptools",
+            import_name="pkg_resources",
+            mirror="https://pypi.org/simple",
+            timeout=180,
+        )
+    except Exception as e:
+        logger.warning(f"安装/导入 pkg_resources 失败，继续尝试 NeteaseCloudMusic: {e}")
+
     attempts = [
         ("NeteaseCloudMusic==0.1.10", "https://pypi.org/simple"),
         ("NeteaseCloudMusic", "https://pypi.org/simple"),
-        ("NeteaseCloudMusic==0.1.10", "https://pypi.com.cn/simple"),
-        ("NeteaseCloudMusic", "https://pypi.com.cn/simple"),
     ]
     errors: list[str] = []
     for package_spec, mirror in attempts:
@@ -48,6 +66,17 @@ def _load_sdk() -> Optional[str]:
         except Exception as e:
             errors.append(f"{package_spec} @ {mirror}: {e}")
             logger.warning(f"NeteaseCloudMusic SDK 加载失败: {package_spec} @ {mirror}: {e}")
+            try:
+                module = import_module("NeteaseCloudMusic")
+                NeteaseCloudMusicApi = module.NeteaseCloudMusicApi
+                _session_state["load_error"] = None
+                logger.info("NeteaseCloudMusic SDK 动态安装后直接导入成功")
+                return None
+            except Exception as import_error:
+                errors.append(f"direct import after {package_spec}: {type(import_error).__name__}: {import_error}")
+                logger.warning(
+                    f"NeteaseCloudMusic SDK 直接导入仍失败: {type(import_error).__name__}: {import_error}",
+                )
 
     error = "NeteaseCloudMusic SDK 安装或导入失败。请检查容器网络/PyPI 镜像，或在容器内预先安装 NeteaseCloudMusic。"
     _session_state["load_error"] = f"{error}\n" + "\n".join(errors[-2:])
