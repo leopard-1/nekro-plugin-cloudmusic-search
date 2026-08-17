@@ -6,8 +6,8 @@ import re
 import shlex
 import tempfile
 import time
-from pathlib import Path
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Annotated
 
 import httpx
@@ -84,6 +84,34 @@ class NetEaseCloudMusicConfig(ConfigBase):
         "https://cdn.jsdelivr.net/gh/leopard-1/cloudmusic02@main/default_bg.jpg",
         title="搜索结果图片背景",
         description="搜索结果图片背景 URL。",
+    )
+
+    IMAGE_WIDTH: int = Field(
+        900,
+        title="搜索结果图片宽度",
+        description="image 模式下搜索结果图片宽度，单位像素。",
+        ge=480,
+        le=2000,
+    )
+
+    IMAGE_HEIGHT: int = Field(
+        0,
+        title="搜索结果图片高度",
+        description="image 模式下搜索结果图片高度，单位像素。填 0 时按结果数量自动计算。",
+        ge=0,
+        le=4000,
+    )
+
+    IMAGE_INDEX_COLOR: str = Field(
+        "#ff3850",
+        title="序号字体色号",
+        description="image 模式下结果序号颜色，格式如 #ff3850。",
+    )
+
+    IMAGE_SONG_NAME_COLOR: str = Field(
+        "#ffffff",
+        title="歌名字体色号",
+        description="image 模式下标题和歌名颜色，格式如 #ffffff。",
     )
 
     FONT_PATH: str = Field(
@@ -346,6 +374,10 @@ async def _send_search_result(
                 background_url=config.IMAGE_BACKGROUND_URL,
                 font_path=config.FONT_PATH,
                 default_cover_url=config.DEFAULT_COVER_URL,
+                image_width=config.IMAGE_WIDTH,
+                image_height=config.IMAGE_HEIGHT,
+                index_color=config.IMAGE_INDEX_COLOR,
+                song_name_color=config.IMAGE_SONG_NAME_COLOR,
                 timeout=config.HTTP_TIMEOUT,
             )
             sandbox_path = await ctx.fs.mixed_forward_file(Path(image_path), file_name=Path(image_path).name)

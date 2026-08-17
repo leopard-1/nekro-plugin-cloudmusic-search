@@ -20,6 +20,10 @@ Nekro-Agent 网易云音乐点歌插件，支持歌曲搜索、歌手相关搜�
 - `DEFAULT_QUALITY`：默认音质，支持 `standard`、`higher`、`exhigh`、`lossless`、`hires`
 - `SEARCH_OUTPUT_MODE`：搜索结果输出模式，`text` 或 `image`
 - `IMAGE_BACKGROUND_URL`：搜索结果图片背景 URL
+- `IMAGE_WIDTH`：搜索结果图片宽度，单位像素
+- `IMAGE_HEIGHT`：搜索结果图片高度，单位像素，填 `0` 时自动计算
+- `IMAGE_INDEX_COLOR`：image 模式下序号字体色号，例如 `#ff3850`
+- `IMAGE_SONG_NAME_COLOR`：image 模式下标题和歌名字体色号，例如 `#ffffff`
 - `FONT_PATH`：图片字体路径，支持 ttf/ttc
 - `MAX_SEARCH_RESULTS`：搜索结果数量，1-20
 - `DEFAULT_COVER_URL`：默认封面 URL
