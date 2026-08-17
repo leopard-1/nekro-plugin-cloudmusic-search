@@ -11,6 +11,7 @@ from types import ModuleType
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
+import httpx
 from nekro_agent.api.plugin import dynamic_import_pkg
 from nekro_agent.core import logger
 
@@ -212,13 +213,66 @@ def _request(api_name: str, query: Optional[dict[str, Any]] = None) -> dict[str,
     return result
 
 
+def _search_items(result: dict[str, Any], search_type: int) -> list[Any]:
+    result_data = result.get("result", {})
+    if not isinstance(result_data, dict):
+        return []
+    key = {1: "songs", 10: "albums", 100: "artists"}.get(search_type, "songs")
+    value = result_data.get(key)
+    return value if isinstance(value, list) else []
+
+
+def _web_search_result(keyword: str, search_type: int, max_results: int) -> dict[str, Any]:
+    """使用网易云网页公开搜索接口兜底。
+
+    该接口对应网页搜索页的 s/type 参数，比 SDK 的旧搜索端点更容易搜到新歌。
+    """
+    url = "https://music.163.com/api/search/get/web"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://music.163.com/",
+    }
+    params = {"s": keyword, "type": search_type, "limit": max_results, "offset": 0}
+    with httpx.Client(timeout=15, follow_redirects=True, headers=headers) as client:
+        response = client.get(url, params=params)
+        response.raise_for_status()
+        result = response.json()
+    if not isinstance(result, dict):
+        raise RuntimeError("网易云网页搜索接口返回格式异常")
+    return _unwrap_result(result, "web_search")
+
+
 def _search_result(keyword: str, search_type: int, max_results: int) -> dict[str, Any]:
     query = {"keywords": keyword, "type": search_type, "limit": max_results, "offset": 0}
+    errors: list[str] = []
     try:
-        return _unwrap_result(_request("cloudsearch", query), "cloudsearch")
+        result = _unwrap_result(_request("cloudsearch", query), "cloudsearch")
+        if _search_items(result, search_type):
+            return result
+        errors.append("cloudsearch 返回空结果")
     except Exception as e:
-        logger.warning(f"网易云 cloudsearch 失败，回退旧搜索接口: {e}")
-        return _unwrap_result(_request("search", query), "search")
+        errors.append(f"cloudsearch: {e}")
+
+    try:
+        result = _web_search_result(keyword, search_type, max_results)
+        if _search_items(result, search_type):
+            return result
+        errors.append("web_search 返回空结果")
+    except Exception as e:
+        errors.append(f"web_search: {e}")
+
+    try:
+        result = _unwrap_result(_request("search", query), "search")
+        if _search_items(result, search_type):
+            return result
+        errors.append("search 返回空结果")
+        return result
+    except Exception as e:
+        errors.append(f"search: {e}")
+        raise RuntimeError("网易云搜索失败：" + "；".join(errors[-3:])) from e
 
 
 def _extract_cookie_value(raw_cookie: str, key: str) -> str | None:
