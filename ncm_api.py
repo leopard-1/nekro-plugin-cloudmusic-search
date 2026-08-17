@@ -232,10 +232,9 @@ def login_with_phone_captcha(phone: str, captcha: str, country_code: str = "86")
         "captcha": captcha,
         "countrycode": country_code or "86",
         "ctcode": country_code or "86",
+        "cookie": parse_cookie_string(str(_session_state.get("last_cookie") or "")),
         "timestamp": int(time.time() * 1000),
     }
-    if _session_state.get("last_cookie"):
-        query["cookie"] = _session_state["last_cookie"]
 
     result = api.call_api("/login/cellphone", query)
     if not isinstance(result, dict):
