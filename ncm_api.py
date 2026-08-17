@@ -67,6 +67,19 @@ def _ensure_ncm_help_compat() -> None:
         "/register/anonimous",
         "/verify/getQr",
     }
+    known_plugin_apis = {
+        "/album",
+        "/artist/album",
+        "/artist/top/song",
+        "/captcha/sent",
+        "/captcha/verify",
+        "/login/cellphone",
+        "/search",
+        "/song/detail",
+        "/song/download/url/v1",
+        "/song/url",
+        "/song/url/v1",
+    }
     config_cache: dict[str, Any] | None = None
 
     def _load_config() -> dict[str, Any]:
@@ -87,7 +100,9 @@ def _ensure_ncm_help_compat() -> None:
 
     def api_list() -> list[str]:
         config = _load_config()
-        return [item for item in config if item not in exclude]
+        names = {item for item in config if item not in exclude}
+        names.update(known_plugin_apis)
+        return sorted(names)
 
     def api_help(name: str | None = None) -> str:
         config = _load_config()
