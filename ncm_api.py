@@ -233,6 +233,7 @@ def login_with_phone_captcha(phone: str, captcha: str, country_code: str = "86")
         "countrycode": country_code or "86",
         "ctcode": country_code or "86",
         "cookie": parse_cookie_string(str(_session_state.get("last_cookie") or "")),
+        "realIP": getattr(api, "ip", "116.25.146.177") or "116.25.146.177",
         "timestamp": int(time.time() * 1000),
     }
 
