@@ -1,7 +1,11 @@
 """网易云音乐 API 封装，基于 NeteaseCloudMusic Python SDK。"""
 
+import importlib.util
+import sys
 import time
 from importlib import import_module
+from pathlib import Path
+from types import ModuleType
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -20,12 +24,35 @@ _session_state = {
 }
 
 
+def _ensure_pkg_resources_compat() -> None:
+    """为 NeteaseCloudMusic SDK 提供最小 pkg_resources 兼容层。
+
+    该 SDK 只使用 pkg_resources.resource_filename() 读取包内 JS 文件。
+    在精简容器里 pkg_resources 可能不存在，直接提供这个函数即可。
+    """
+    if "pkg_resources" in sys.modules:
+        return
+
+    module = ModuleType("pkg_resources")
+
+    def resource_filename(package_or_requirement: str, resource_name: str) -> str:
+        spec = importlib.util.find_spec(package_or_requirement)
+        if not spec or not spec.submodule_search_locations:
+            raise ModuleNotFoundError(f"No module named {package_or_requirement!r}")
+        return str(Path(next(iter(spec.submodule_search_locations))) / resource_name)
+
+    module.resource_filename = resource_filename
+    sys.modules["pkg_resources"] = module
+
+
 def _load_sdk() -> Optional[str]:
     """懒加载 NeteaseCloudMusic，避免插件加载阶段被依赖安装问题卡死。"""
     global NeteaseCloudMusicApi
 
     if NeteaseCloudMusicApi:
         return None
+
+    _ensure_pkg_resources_compat()
 
     try:
         module = import_module("NeteaseCloudMusic")
@@ -35,16 +62,6 @@ def _load_sdk() -> Optional[str]:
         return None
     except Exception as e:
         logger.debug(f"直接导入 NeteaseCloudMusic 失败，将尝试动态安装: {e}")
-
-    try:
-        dynamic_import_pkg(
-            "setuptools",
-            import_name="pkg_resources",
-            mirror="https://pypi.org/simple",
-            timeout=180,
-        )
-    except Exception as e:
-        logger.warning(f"安装/导入 pkg_resources 失败，继续尝试 NeteaseCloudMusic: {e}")
 
     attempts = [
         ("NeteaseCloudMusic==0.1.10", "https://pypi.org/simple"),
