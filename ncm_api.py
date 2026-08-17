@@ -1,233 +1,27 @@
-"""网易云音乐 API 封装，基于 NeteaseCloudMusic Python SDK。"""
+"""网易云音乐 API 封装，直接使用 apis.netstart.cn/music HTTP 接口。"""
 
-import json
-import importlib.util
+import logging
 import re
-import sys
 import time
-from importlib import import_module
-from pathlib import Path
-from types import ModuleType
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import httpx
-from nekro_agent.api.plugin import dynamic_import_pkg
-from nekro_agent.core import logger
 
 from .models import AlbumDetail, AlbumInfo, ArtistSearchResult, AudioDownloadInfo, SongInfo
 
-NeteaseCloudMusicApi = None
-_api = None
+logger = logging.getLogger(__name__)
+
+API_BASE = "https://apis.netstart.cn/music"
+LOGIN_COOKIE_KEYS = ("MUSIC_A_T", "MUSIC_R_T", "__csrf", "MUSIC_SNS", "MUSIC_U", "NMTID")
 
 _session_state = {
     "initialized": False,
-    "last_cookie": None,
-    "load_error": None,
+    "last_cookie": "",
 }
 
-LOGIN_COOKIE_KEYS = ("MUSIC_A_T", "MUSIC_R_T", "__csrf", "MUSIC_SNS", "MUSIC_U", "NMTID")
-DEFAULT_REAL_IP = "116.25.146.177"
 
-
-def _ensure_pkg_resources_compat() -> None:
-    """为 NeteaseCloudMusic SDK 提供最小 pkg_resources 兼容层。
-
-    该 SDK 只使用 pkg_resources.resource_filename() 读取包内 JS 文件。
-    在精简容器里 pkg_resources 可能不存在，直接提供这个函数即可。
-    """
-    if "pkg_resources" in sys.modules:
-        return
-
-    module = ModuleType("pkg_resources")
-
-    def resource_filename(package_or_requirement: str, resource_name: str) -> str:
-        spec = importlib.util.find_spec(package_or_requirement)
-        if (not spec or not spec.submodule_search_locations) and "." in package_or_requirement:
-            spec = importlib.util.find_spec(package_or_requirement.rsplit(".", 1)[0])
-        if not spec or not spec.submodule_search_locations:
-            raise ModuleNotFoundError(f"No module named {package_or_requirement!r}")
-        return str(Path(next(iter(spec.submodule_search_locations))) / resource_name)
-
-    module.resource_filename = resource_filename
-    sys.modules["pkg_resources"] = module
-
-
-def _ensure_ncm_help_compat() -> None:
-    """为缺失或失效的 NeteaseCloudMusic.help 提供兼容实现。"""
-    if "NeteaseCloudMusic.help" in sys.modules:
-        return
-
-    module = ModuleType("NeteaseCloudMusic.help")
-    exclude = {
-        "/request/reference",
-        "/avatar/upload",
-        "/cloud",
-        "/playlist/cover/update",
-        "/voice/upload",
-        "/register/anonimous",
-        "/verify/getQr",
-    }
-    known_plugin_apis = {
-        "/album",
-        "/artist/album",
-        "/artist/top/song",
-        "/captcha/sent",
-        "/captcha/verify",
-        "/cloudsearch",
-        "/login/cellphone",
-        "/search",
-        "/song/detail",
-        "/song/download/url/v1",
-        "/song/url",
-        "/song/url/v1",
-    }
-    config_cache: dict[str, Any] | None = None
-
-    def _load_config() -> dict[str, Any]:
-        nonlocal config_cache
-        if config_cache is not None:
-            return config_cache
-        spec = importlib.util.find_spec("NeteaseCloudMusic")
-        if not spec or not spec.submodule_search_locations:
-            config_cache = {}
-            return config_cache
-        config_path = Path(next(iter(spec.submodule_search_locations))) / "config.json"
-        try:
-            config_cache = json.loads(config_path.read_text(encoding="utf-8"))
-        except Exception as e:
-            logger.warning(f"读取 NeteaseCloudMusic config.json 失败: {e}")
-            config_cache = {}
-        return config_cache
-
-    def api_list() -> list[str]:
-        config = _load_config()
-        names = {item for item in config if item not in exclude}
-        names.update(known_plugin_apis)
-        return sorted(names)
-
-    def api_help(name: str | None = None) -> str:
-        config = _load_config()
-        if name is None:
-            return "NeteaseCloudMusicApi request(apiName, queryDict)"
-        if name in api_list():
-            item = config.get(name, {})
-            return f'name: {name}\n    {item.get("name", "")}\n    {item.get("explain", "")}'
-        return f"apiName: {name} not found"
-
-    module.api_list = api_list
-    module.api_help = api_help
-    sys.modules["NeteaseCloudMusic.help"] = module
-
-
-def _clear_ncm_module_cache() -> None:
-    """清理失败导入后残留的 NeteaseCloudMusic 模块缓存，保留兼容 help 模块。"""
-    for name in list(sys.modules):
-        if name == "NeteaseCloudMusic.help":
-            continue
-        if name == "NeteaseCloudMusic" or name.startswith("NeteaseCloudMusic."):
-            sys.modules.pop(name, None)
-
-
-def _load_sdk() -> Optional[str]:
-    """懒加载 NeteaseCloudMusic，避免插件加载阶段被依赖安装问题卡死。"""
-    global NeteaseCloudMusicApi
-
-    if NeteaseCloudMusicApi:
-        return None
-
-    _ensure_pkg_resources_compat()
-    _ensure_ncm_help_compat()
-
-    try:
-        module = import_module("NeteaseCloudMusic")
-        NeteaseCloudMusicApi = module.NeteaseCloudMusicApi
-        _session_state["load_error"] = None
-        logger.info("NeteaseCloudMusic SDK 已在当前环境中可用")
-        return None
-    except Exception as e:
-        logger.debug(f"直接导入 NeteaseCloudMusic 失败，将尝试动态安装: {e}")
-
-    attempts = [
-        ("NeteaseCloudMusic==0.1.10", "https://pypi.org/simple"),
-        ("NeteaseCloudMusic", "https://pypi.org/simple"),
-    ]
-    errors: list[str] = []
-    for package_spec, mirror in attempts:
-        try:
-            _clear_ncm_module_cache()
-            _ensure_ncm_help_compat()
-            module = dynamic_import_pkg(
-                package_spec,
-                import_name="NeteaseCloudMusic",
-                mirror=mirror,
-                timeout=240,
-            )
-            NeteaseCloudMusicApi = module.NeteaseCloudMusicApi
-            _session_state["load_error"] = None
-            logger.info(f"NeteaseCloudMusic SDK 加载成功: {package_spec} @ {mirror}")
-            return None
-        except Exception as e:
-            errors.append(f"{package_spec} @ {mirror}: {e}")
-            logger.warning(f"NeteaseCloudMusic SDK 加载失败: {package_spec} @ {mirror}: {e}")
-            try:
-                _clear_ncm_module_cache()
-                _ensure_ncm_help_compat()
-                module = import_module("NeteaseCloudMusic")
-                NeteaseCloudMusicApi = module.NeteaseCloudMusicApi
-                _session_state["load_error"] = None
-                logger.info("NeteaseCloudMusic SDK 动态安装后直接导入成功")
-                return None
-            except Exception as import_error:
-                errors.append(f"direct import after {package_spec}: {type(import_error).__name__}: {import_error}")
-                logger.warning(
-                    f"NeteaseCloudMusic SDK 直接导入仍失败: {type(import_error).__name__}: {import_error}",
-                )
-
-    error = "NeteaseCloudMusic SDK 安装或导入失败。请检查容器网络/PyPI 镜像，或在容器内预先安装 NeteaseCloudMusic。"
-    _session_state["load_error"] = f"{error}\n" + "\n".join(errors[-2:])
-    return str(_session_state["load_error"])
-
-
-def _get_api():
-    """获取 SDK 实例。SDK 文档提示实例不要跨线程使用，NA 插件通常在同一事件循环中调用。"""
-    global _api
-
-    load_error = _load_sdk()
-    if load_error:
-        raise RuntimeError(load_error)
-    if _api is None:
-        _api = NeteaseCloudMusicApi(debug=False, cache=False)
-    return _api
-
-
-def _request(api_name: str, query: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-    api = _get_api()
-    payload = dict(query or {})
-    payload.setdefault("timestamp", int(time.time() * 1000))
-    if _session_state.get("last_cookie") and not payload.get("cookie"):
-        payload["cookie"] = _session_state["last_cookie"]
-    result = api.request(api_name, payload)
-    if not isinstance(result, dict):
-        raise RuntimeError(f"网易云接口 {api_name} 返回格式异常")
-    return result
-
-
-def _search_items(result: dict[str, Any], search_type: int) -> list[Any]:
-    result_data = result.get("result", {})
-    if not isinstance(result_data, dict):
-        return []
-    key = {1: "songs", 10: "albums", 100: "artists"}.get(search_type, "songs")
-    value = result_data.get(key)
-    return value if isinstance(value, list) else []
-
-
-def _web_search_result(keyword: str, search_type: int, max_results: int) -> dict[str, Any]:
-    """使用网易云网页公开搜索接口兜底。
-
-    该接口对应网页搜索页的 s/type 参数，比 SDK 的旧搜索端点更容易搜到新歌。
-    """
-    url = "https://music.163.com/api/search/get/web"
+def _headers() -> dict[str, str]:
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -235,44 +29,31 @@ def _web_search_result(keyword: str, search_type: int, max_results: int) -> dict
         ),
         "Referer": "https://music.163.com/",
     }
-    params = {"s": keyword, "type": search_type, "limit": max_results, "offset": 0}
-    with httpx.Client(timeout=15, follow_redirects=True, headers=headers) as client:
-        response = client.get(url, params=params)
+    cookie = str(_session_state.get("last_cookie") or "").strip()
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
+def _api_get(path: str, params: Optional[dict[str, Any]] = None, timeout: int = 20) -> dict[str, Any]:
+    url = f"{API_BASE}/{path.lstrip('/')}"
+    query = dict(params or {})
+    query.setdefault("timestamp", int(time.time() * 1000))
+    with httpx.Client(timeout=timeout, follow_redirects=True, headers=_headers()) as client:
+        response = client.get(url, params=query)
         response.raise_for_status()
         result = response.json()
     if not isinstance(result, dict):
-        raise RuntimeError("网易云网页搜索接口返回格式异常")
-    return _unwrap_result(result, "web_search")
+        raise RuntimeError(f"网易云接口 {path} 返回格式异常")
+    return result
 
 
-def _search_result(keyword: str, search_type: int, max_results: int) -> dict[str, Any]:
-    query = {"keywords": keyword, "type": search_type, "limit": max_results, "offset": 0}
-    errors: list[str] = []
-    try:
-        result = _unwrap_result(_request("cloudsearch", query), "cloudsearch")
-        if _search_items(result, search_type):
-            return result
-        errors.append("cloudsearch 返回空结果")
-    except Exception as e:
-        errors.append(f"cloudsearch: {e}")
-
-    try:
-        result = _web_search_result(keyword, search_type, max_results)
-        if _search_items(result, search_type):
-            return result
-        errors.append("web_search 返回空结果")
-    except Exception as e:
-        errors.append(f"web_search: {e}")
-
-    try:
-        result = _unwrap_result(_request("search", query), "search")
-        if _search_items(result, search_type):
-            return result
-        errors.append("search 返回空结果")
-        return result
-    except Exception as e:
-        errors.append(f"search: {e}")
-        raise RuntimeError("网易云搜索失败：" + "；".join(errors[-3:])) from e
+def _unwrap_result(result: dict[str, Any], api_name: str) -> dict[str, Any]:
+    code = result.get("code")
+    if code not in (None, 200):
+        message = result.get("message") or result.get("msg") or result.get("error") or "未知错误"
+        raise RuntimeError(f"网易云接口 {api_name} 调用失败: {code} {message}")
+    return result
 
 
 def _extract_cookie_value(raw_cookie: str, key: str) -> str | None:
@@ -286,7 +67,6 @@ def _extract_cookie_value(raw_cookie: str, key: str) -> str | None:
 
 
 def build_login_cookie_string(raw_cookie: str) -> str:
-    """从登录响应 Set-Cookie 中提取插件需要的网易云 Cookie 字段。"""
     cookie_parts: list[str] = []
     for key in LOGIN_COOKIE_KEYS:
         value = _extract_cookie_value(raw_cookie, key)
@@ -295,71 +75,11 @@ def build_login_cookie_string(raw_cookie: str) -> str:
     return "; ".join(cookie_parts)
 
 
-def send_phone_captcha(phone: str, country_code: str = "86") -> dict[str, Any]:
-    """向手机号发送网易云验证码。"""
-    result = _unwrap_result(
-        _request("captcha_sent", {"phone": phone, "ctcode": country_code or "86", "realIP": DEFAULT_REAL_IP}),
-        "captcha_sent",
-    )
-    return result
-
-
-def verify_phone_captcha(phone: str, captcha: str, country_code: str = "86") -> dict[str, Any]:
-    """校验网易云短信验证码，便于把验证码错误和登录风控区分开。"""
-    result = _unwrap_result(
-        _request(
-            "captcha_verify",
-            {
-                "phone": phone,
-                "captcha": captcha,
-                "ctcode": country_code or "86",
-                "realIP": DEFAULT_REAL_IP,
-            },
-        ),
-        "captcha_verify",
-    )
-    return result
-
-
-def login_with_phone_captcha(phone: str, captcha: str, country_code: str = "86") -> tuple[str, dict[str, Any]]:
-    """使用手机号验证码登录，并返回筛选后的 Cookie 字符串。"""
-    api = _get_api()
-    query = {
-        "phone": phone,
-        "captcha": captcha,
-        "countrycode": country_code or "86",
-        "ctcode": country_code or "86",
-        "cookie": parse_cookie_string(str(_session_state.get("last_cookie") or "")),
-        "realIP": DEFAULT_REAL_IP,
-        "timestamp": int(time.time() * 1000),
-    }
-
-    result = api.call_api("/login/cellphone", query)
-    if not isinstance(result, dict):
-        raise RuntimeError("网易云登录接口返回格式异常")
-    result = _unwrap_result(result, "login_cellphone")
-
-    raw_cookie = str(result.get("cookie") or result.get("data", {}).get("cookie") or "")
-    cookie_string = build_login_cookie_string(raw_cookie)
-    cookie_dict = parse_cookie_string(cookie_string)
-    if not any(cookie_dict.get(key) for key in ("MUSIC_U", "MUSIC_A_T", "MUSIC_R_T")):
-        raise RuntimeError("登录响应未包含有效登录 Cookie，请稍后重试或改用浏览器 Cookie。")
-    if not cookie_dict.get("__csrf"):
-        logger.warning("网易云登录响应未包含 __csrf，部分接口可能需要稍后重新登录。")
-
-    _session_state["initialized"] = True
-    _session_state["last_cookie"] = cookie_string
-    return cookie_string, result
-
-
 def parse_cookie_string(cookie_string: str) -> Dict[str, str]:
-    """解析 Cookie 字符串为字典。保留给兼容逻辑使用。"""
-    cookies = {}
+    cookies: dict[str, str] = {}
     if not cookie_string or not cookie_string.strip():
         return cookies
-
-    cookie_string = cookie_string.replace("\n", "; ").replace("\r", "")
-    for item in cookie_string.split(";"):
+    for item in cookie_string.replace("\n", "; ").replace("\r", "").split(";"):
         item = item.strip()
         if "=" in item:
             key, _, value = item.partition("=")
@@ -367,8 +87,51 @@ def parse_cookie_string(cookie_string: str) -> Dict[str, str]:
     return cookies
 
 
+def _artist_names(raw_artists: Any) -> str:
+    if not isinstance(raw_artists, list):
+        return "未知歌手"
+    names = [str(item.get("name", "")).strip() for item in raw_artists if isinstance(item, dict)]
+    return ", ".join(name for name in names if name) or "未知歌手"
+
+
+def _first_dict(*values: Any) -> Dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _parse_song(data: Dict[str, Any], default_cover_url: str) -> SongInfo:
+    album_data = _first_dict(data.get("al"), data.get("album"))
+    artists = data.get("ar") or data.get("artists") or []
+    cover_url_raw = album_data.get("picUrl") or album_data.get("blurPicUrl") or data.get("picUrl")
+    cover_url = f"{cover_url_raw}?param=140y140" if cover_url_raw else default_cover_url
+    return SongInfo(
+        id=int(data["id"]),
+        name=str(data.get("name") or "未知歌曲"),
+        artist=_artist_names(artists),
+        album=str(album_data.get("name") or "未知专辑"),
+        duration=int(data.get("dt") or data.get("duration") or 0),
+        cover_url=cover_url,
+    )
+
+
+def _parse_album(data: Dict[str, Any], default_cover_url: str) -> AlbumInfo:
+    artist_data = _first_dict(data.get("artist"))
+    artists = data.get("artists") or ([artist_data] if artist_data else [])
+    cover_url_raw = data.get("picUrl") or data.get("blurPicUrl")
+    cover_url = f"{cover_url_raw}?param=180y180" if cover_url_raw else default_cover_url
+    return AlbumInfo(
+        id=int(data["id"]),
+        name=str(data.get("name") or "未知专辑"),
+        artist=_artist_names(artists),
+        song_count=int(data.get("size") or data.get("trackCount") or data.get("containedSong") or 0),
+        publish_time=data.get("publishTime"),
+        cover_url=cover_url,
+    )
+
+
 def normalize_quality(raw_quality: str, default_quality: str = "lossless") -> str:
-    """归一化音质配置或用户会话里的音质要求。"""
     value = (raw_quality or "").strip().lower()
     mapping = {
         "standard": "standard",
@@ -398,158 +161,95 @@ def normalize_quality(raw_quality: str, default_quality: str = "lossless") -> st
     return mapping.get(default_value, "lossless")
 
 
-def _first_dict(*values: Any) -> Dict[str, Any]:
-    for value in values:
-        if isinstance(value, dict):
-            return value
-    return {}
-
-
-def _artist_names(raw_artists: Any) -> str:
-    if not isinstance(raw_artists, list):
-        return "未知歌手"
-    names = [str(item.get("name", "")).strip() for item in raw_artists if isinstance(item, dict)]
-    return ", ".join(name for name in names if name) or "未知歌手"
-
-
-def _parse_song(data: Dict[str, Any], default_cover_url: str) -> SongInfo:
-    album_data = _first_dict(data.get("al"), data.get("album"))
-    artists = data.get("ar") or data.get("artists") or []
-    cover_url_raw = album_data.get("picUrl") or data.get("picUrl")
-    cover_url = f"{cover_url_raw}?param=140y140" if cover_url_raw else default_cover_url
-    return SongInfo(
-        id=int(data["id"]),
-        name=str(data.get("name") or "未知歌曲"),
-        artist=_artist_names(artists),
-        album=str(album_data.get("name") or "未知专辑"),
-        duration=int(data.get("dt") or data.get("duration") or 0),
-        cover_url=cover_url,
-    )
-
-
-def _parse_album(data: Dict[str, Any], default_cover_url: str) -> AlbumInfo:
-    artist_data = _first_dict(data.get("artist"))
-    artists = data.get("artists") or ([artist_data] if artist_data else [])
-    cover_url_raw = data.get("picUrl") or data.get("blurPicUrl")
-    cover_url = f"{cover_url_raw}?param=180y180" if cover_url_raw else default_cover_url
-    return AlbumInfo(
-        id=int(data["id"]),
-        name=str(data.get("name") or "未知专辑"),
-        artist=_artist_names(artists),
-        song_count=int(data.get("size") or data.get("trackCount") or data.get("containedSong") or 0),
-        publish_time=data.get("publishTime"),
-        cover_url=cover_url,
-    )
-
-
-def _unwrap_result(result: dict[str, Any], api_name: str) -> dict[str, Any]:
-    code = result.get("code")
-    if code not in (None, 200):
-        message = result.get("message") or result.get("msg") or result.get("error") or "未知错误"
-        raise RuntimeError(f"网易云接口 {api_name} 调用失败: {code} {message}")
-    return result
+def _quality_bitrate(quality: str) -> int:
+    return {
+        "standard": 128000,
+        "higher": 192000,
+        "exhigh": 320000,
+        "lossless": 999000,
+        "hires": 1999000,
+    }.get(quality, 999000)
 
 
 def ensure_session_initialized(cookie_string: str) -> Optional[str]:
-    """确保 SDK 可用并记录 Cookie。"""
-    load_error = _load_sdk()
-    if load_error:
-        _session_state["initialized"] = False
-        return load_error
-
-    if not cookie_string or not cookie_string.strip():
-        _session_state["initialized"] = True
-        _session_state["last_cookie"] = ""
-        return None
-
-    cookies_dict = parse_cookie_string(cookie_string)
-    if not any(key in cookies_dict for key in ("MUSIC_U", "MUSIC_A", "MUSIC_A_T", "MUSIC_R_T")):
-        _session_state["initialized"] = False
-        return "Cookie 字符串缺少网易云登录凭据，请确认包含 MUSIC_U、MUSIC_A 或 MUSIC_A_T/MUSIC_R_T 等字段"
-
     _session_state["initialized"] = True
-    _session_state["last_cookie"] = cookie_string
-    logger.info("NeteaseCloudMusic SDK 会话初始化成功")
+    _session_state["last_cookie"] = cookie_string.strip() if cookie_string else ""
     return None
 
 
-def search_songs_from_ncm(
-    keyword: str,
-    max_results: int,
-    default_cover_url: str,
-) -> List[SongInfo]:
-    """从网易云音乐搜索歌曲。"""
+def _search_result(keyword: str, search_type: int, max_results: int) -> dict[str, Any]:
+    return _unwrap_result(
+        _api_get("search", {"keywords": keyword, "type": search_type, "limit": max_results, "offset": 0}),
+        "search",
+    )
+
+
+def search_songs_from_ncm(keyword: str, max_results: int, default_cover_url: str) -> List[SongInfo]:
     result = _search_result(keyword, 1, max_results)
-    songs_data: List[Dict[str, Any]] = result.get("result", {}).get("songs", [])
+    songs_data = result.get("result", {}).get("songs", [])
     if not songs_data:
         raise ValueError(f"未找到与'{keyword}'相关的歌曲")
 
-    songs: List[SongInfo] = []
+    songs: list[SongInfo] = []
     for item in songs_data[:max_results]:
+        if not isinstance(item, dict):
+            continue
         try:
             songs.append(_parse_song(item, default_cover_url))
         except Exception as e:
             logger.warning(f"处理歌曲 {item.get('name', 'Unknown')} 失败: {e}")
-
     if not songs:
         raise ValueError(f"未能解析'{keyword}'的搜索结果")
     return songs
 
 
-def search_albums_from_ncm(
-    keyword: str,
-    max_results: int,
-    default_cover_url: str,
-) -> List[AlbumInfo]:
-    """从网易云音乐搜索专辑。"""
+def search_albums_from_ncm(keyword: str, max_results: int, default_cover_url: str) -> List[AlbumInfo]:
     result = _search_result(keyword, 10, max_results)
-    albums_data: List[Dict[str, Any]] = result.get("result", {}).get("albums", [])
+    albums_data = result.get("result", {}).get("albums", [])
     if not albums_data:
         raise ValueError(f"未找到与'{keyword}'相关的专辑")
 
-    albums: List[AlbumInfo] = []
+    albums: list[AlbumInfo] = []
     for item in albums_data[:max_results]:
+        if not isinstance(item, dict):
+            continue
         try:
             albums.append(_parse_album(item, default_cover_url))
         except Exception as e:
             logger.warning(f"处理专辑 {item.get('name', 'Unknown')} 失败: {e}")
-
     if not albums:
         raise ValueError(f"未能解析'{keyword}'的专辑搜索结果")
     return albums
 
 
-def search_artist_music_from_ncm(
-    artist_keyword: str,
-    max_results: int,
-    default_cover_url: str,
-) -> ArtistSearchResult:
-    """根据歌手关键词聚合搜索相关歌曲和专辑。"""
+def search_artist_music_from_ncm(artist_keyword: str, max_results: int, default_cover_url: str) -> ArtistSearchResult:
     limit = min(max_results, 20)
     songs: list[SongInfo] = []
     albums: list[AlbumInfo] = []
 
     artist_result = _search_result(artist_keyword, 100, 3)
     artists = artist_result.get("result", {}).get("artists", [])
-    if artists:
-        artist_id = artists[0].get("id")
-        if artist_id:
-            try:
-                songs_result = _unwrap_result(_request("artist_top_song", {"id": artist_id}), "artist_top_song")
-                raw_songs = songs_result.get("songs") or songs_result.get("data") or []
-                songs = [_parse_song(item, default_cover_url) for item in raw_songs[:limit] if isinstance(item, dict)]
-            except Exception as e:
-                logger.warning(f"获取歌手热门歌曲失败，回退关键词搜索: {e}")
+    artist_id = None
+    if isinstance(artists, list) and artists:
+        artist_id = artists[0].get("id") if isinstance(artists[0], dict) else None
 
-            try:
-                albums_result = _unwrap_result(
-                    _request("artist_album", {"id": artist_id, "limit": limit, "offset": 0}),
-                    "artist_album",
-                )
-                raw_albums = albums_result.get("hotAlbums") or albums_result.get("artist", {}).get("albums") or []
-                albums = [_parse_album(item, default_cover_url) for item in raw_albums[:limit] if isinstance(item, dict)]
-            except Exception as e:
-                logger.warning(f"获取歌手专辑失败，回退关键词搜索: {e}")
+    if artist_id:
+        try:
+            songs_result = _unwrap_result(_api_get("artist/top/song", {"id": artist_id}), "artist_top_song")
+            raw_songs = songs_result.get("songs") or songs_result.get("data") or []
+            songs = [_parse_song(item, default_cover_url) for item in raw_songs[:limit] if isinstance(item, dict)]
+        except Exception as e:
+            logger.warning(f"获取歌手热门歌曲失败，回退关键词搜索: {e}")
+
+        try:
+            albums_result = _unwrap_result(
+                _api_get("artist/album", {"id": artist_id, "limit": limit, "offset": 0}),
+                "artist_album",
+            )
+            raw_albums = albums_result.get("hotAlbums") or albums_result.get("artist", {}).get("albums") or []
+            albums = [_parse_album(item, default_cover_url) for item in raw_albums[:limit] if isinstance(item, dict)]
+        except Exception as e:
+            logger.warning(f"获取歌手专辑失败，回退关键词搜索: {e}")
 
     if not songs:
         try:
@@ -561,15 +261,13 @@ def search_artist_music_from_ncm(
             albums = search_albums_from_ncm(artist_keyword, limit, default_cover_url)
         except ValueError:
             albums = []
-
     if not songs and not albums:
         raise ValueError(f"未找到与歌手'{artist_keyword}'相关的歌曲或专辑")
     return ArtistSearchResult(keyword=artist_keyword, songs=songs[:limit], albums=albums[:limit])
 
 
 def get_song_detail(song_id: int) -> Dict[str, Any]:
-    """获取歌曲详情。"""
-    result = _unwrap_result(_request("song_detail", {"ids": str(song_id)}), "song_detail")
+    result = _unwrap_result(_api_get("song/detail", {"ids": str(song_id)}), "song_detail")
     songs = result.get("songs", [])
     if not isinstance(songs, list) or not songs:
         raise ValueError(f"未找到歌曲ID {song_id}")
@@ -577,85 +275,95 @@ def get_song_detail(song_id: int) -> Dict[str, Any]:
 
 
 def get_album_detail(album_id: int, default_cover_url: str, max_songs: int = 20) -> AlbumDetail:
-    """获取专辑详情。"""
-    result = _unwrap_result(_request("album", {"id": str(album_id)}), "album")
+    result = _unwrap_result(_api_get("album", {"id": str(album_id)}), "album")
     raw_album = result.get("album")
     if not isinstance(raw_album, dict):
         raise ValueError(f"未找到专辑ID {album_id}")
 
     raw_songs = result.get("songs") or raw_album.get("songs") or []
-    songs: List[SongInfo] = []
-    for item in raw_songs[:max_songs]:
-        if not isinstance(item, dict):
-            continue
-        try:
-            songs.append(_parse_song(item, default_cover_url))
-        except Exception as e:
-            logger.warning(f"处理专辑歌曲失败: {e}")
-
+    songs = [_parse_song(item, default_cover_url) for item in raw_songs[:max_songs] if isinstance(item, dict)]
     return AlbumDetail(album=_parse_album(raw_album, default_cover_url), songs=songs)
 
 
-def _audio_from_result(result: dict[str, Any]) -> dict[str, Any]:
-    data = result.get("data")
-    if isinstance(data, list) and data:
-        return data[0] if isinstance(data[0], dict) else {}
-    if isinstance(data, dict):
-        return data
-    return {}
-
-
 def get_song_audio_info(song_id: int, quality: str, default_quality: str = "lossless") -> AudioDownloadInfo:
-    """获取指定音质的歌曲音频 URL。"""
     normalized_quality = normalize_quality(quality, default_quality)
-
-    result = _unwrap_result(
-        _request("song_url_v1", {"id": str(song_id), "level": normalized_quality}),
-        "song_url_v1",
-    )
-    item = _audio_from_result(result)
-
-    if not item.get("url"):
-        try:
-            result = _unwrap_result(
-                _request("song_download_url_v1", {"id": str(song_id), "level": normalized_quality}),
-                "song_download_url_v1",
-            )
-            item = _audio_from_result(result)
-        except Exception as e:
-            logger.warning(f"新版下载 URL 获取失败: {e}")
-
-    if not item.get("url"):
-        bitrate = {
-            "standard": "128000",
-            "higher": "320000",
-            "exhigh": "320000",
-            "lossless": "999000",
-            "hires": "999000",
-        }.get(normalized_quality, "320000")
-        result = _unwrap_result(_request("song_url", {"id": str(song_id), "br": bitrate}), "song_url")
-        item = _audio_from_result(result)
+    bitrate = _quality_bitrate(normalized_quality)
+    result = _unwrap_result(_api_get("song/download/url", {"id": str(song_id), "br": bitrate}), "song_download_url")
+    item = result.get("data")
+    if not isinstance(item, dict):
+        raise RuntimeError("网易云音频接口返回格式异常")
 
     url = str(item.get("url") or "").strip()
     if not url:
-        raise ValueError("该歌曲暂时无法获取可播放音频 URL，可能需要会员、已下架或受版权限制")
+        message = item.get("message") or "该歌曲暂时无法获取可播放音频 URL，可能需要会员、已下架或受版权限制"
+        raise ValueError(str(message))
 
-    parsed_ext = urlparse(url).path.rsplit(".", 1)[-1].lower() if "." in urlparse(url).path else "mp3"
-    extension = "mp3" if parsed_ext not in {"mp3", "wav", "ncm"} else parsed_ext
+    parsed_ext = urlparse(url).path.rsplit(".", 1)[-1].lower() if "." in urlparse(url).path else ""
+    extension = str(item.get("type") or item.get("encodeType") or parsed_ext or "mp3").lower()
+    if extension not in {"mp3", "wav", "ncm", "flac"}:
+        extension = "mp3" if parsed_ext not in {"mp3", "wav", "ncm", "flac"} else parsed_ext
     return AudioDownloadInfo(
         song_id=song_id,
         url=url,
-        quality=normalized_quality,
+        quality=str(item.get("level") or normalized_quality),
         extension=extension,
         size=int(item.get("size") or 0),
-        bitrate=int(item.get("br") or 0),
+        bitrate=int(item.get("br") or bitrate),
     )
 
 
+def send_phone_captcha(phone: str, country_code: str = "86") -> dict[str, Any]:
+    return _unwrap_result(_api_get("captcha/sent", {"phone": phone, "ctcode": country_code or "86"}), "captcha_sent")
+
+
+def verify_phone_captcha(phone: str, captcha: str, country_code: str = "86") -> dict[str, Any]:
+    return _unwrap_result(
+        _api_get("captcha/verify", {"phone": phone, "captcha": captcha, "ctcode": country_code or "86"}),
+        "captcha_verify",
+    )
+
+
+def login_with_phone_captcha(phone: str, captcha: str, country_code: str = "86") -> tuple[str, dict[str, Any]]:
+    result = _unwrap_result(
+        _api_get(
+            "login/cellphone",
+            {"phone": phone, "captcha": captcha, "countrycode": country_code or "86", "ctcode": country_code or "86"},
+        ),
+        "login_cellphone",
+    )
+    raw_cookie = str(result.get("cookie") or result.get("data", {}).get("cookie") or "")
+    cookie_string = build_login_cookie_string(raw_cookie) or raw_cookie
+    if not cookie_string:
+        raise RuntimeError("登录成功但响应未包含 Cookie，请稍后重试。")
+    _session_state["last_cookie"] = cookie_string
+    return cookie_string, result
+
+
+def create_qr_login() -> tuple[str, str]:
+    key_result = _unwrap_result(_api_get("login/qr/key"), "login_qr_key")
+    key = str(key_result.get("data", {}).get("unikey") or "").strip()
+    if not key:
+        raise RuntimeError("二维码登录 key 获取失败")
+
+    qr_result = _unwrap_result(_api_get("login/qr/create", {"key": key, "qrimg": "true"}), "login_qr_create")
+    qrimg = str(qr_result.get("data", {}).get("qrimg") or "").strip()
+    if not qrimg:
+        raise RuntimeError("二维码图片生成失败")
+    return key, qrimg
+
+
+def check_qr_login(key: str) -> tuple[int, str, str]:
+    result = _api_get("login/qr/check", {"key": key})
+    code = int(result.get("code") or 0)
+    message = str(result.get("message") or result.get("msg") or "")
+    raw_cookie = str(result.get("cookie") or result.get("data", {}).get("cookie") or "")
+    cookie_string = build_login_cookie_string(raw_cookie) or raw_cookie
+    if code == 803 and cookie_string:
+        _session_state["last_cookie"] = cookie_string
+    return code, message, cookie_string
+
+
 def cleanup_ncm_session():
-    """兼容旧入口名称，清理 SDK 实例。"""
-    global _api
-    _api = None
     _session_state["initialized"] = False
-    _session_state["last_cookie"] = None
-    logger.info("NeteaseCloudMusic SDK 会话已清理")
+    _session_state["last_cookie"] = ""
+    logger.info("网易云 HTTP API 会话已清理")

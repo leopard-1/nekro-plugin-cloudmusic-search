@@ -1,8 +1,11 @@
 """网易云音乐点歌插件"""
 
+import asyncio
+import base64
 import re
 import shlex
 import tempfile
+import time
 from pathlib import Path
 from typing import Annotated
 
@@ -25,6 +28,8 @@ from .image_gen import generate_result_image
 from .models import AlbumInfo, ArtistSearchResult, SongInfo
 from .ncm_api import (
     cleanup_ncm_session,
+    check_qr_login,
+    create_qr_login,
     ensure_session_initialized,
     get_album_detail,
     get_song_audio_info,
@@ -248,6 +253,14 @@ def _parse_login_phone(raw_text: str) -> tuple[str, str]:
     return phone, country_code
 
 
+def _is_qr_login(raw_text: str) -> bool:
+    try:
+        tokens = shlex.split(raw_text or "")
+    except ValueError:
+        tokens = (raw_text or "").split()
+    return any(token.lower() in {"-qr", "--qr", "qr", "二维码"} for token in tokens)
+
+
 def _validate_phone(phone: str) -> str | None:
     if not phone:
         return "请输入手机号，例如：/cm_login -phone 13800138000"
@@ -268,6 +281,14 @@ def _save_cookie_to_config(cookie_string: str) -> None:
     config.NCM_COOKIE = cookie_string
     plugin.save_config(config)
     ensure_session_initialized(cookie_string)
+
+
+def _save_qr_image(qrimg: str) -> Path:
+    raw = qrimg.split(",", 1)[1] if "," in qrimg else qrimg
+    image_bytes = base64.b64decode(raw)
+    path = Path(tempfile.gettempdir()) / f"cloudmusic_qr_{int(time.time() * 1000)}.png"
+    path.write_bytes(image_bytes)
+    return path
 
 
 def _format_songs(title: str, songs: list[SongInfo]) -> str:
@@ -564,6 +585,7 @@ async def cm_help_cmd(context: CommandExecutionContext) -> CommandResponse:
                 "/cm_play <编号或歌曲ID> [standard|higher|exhigh|lossless|hires] - 播放歌曲，命令音质优先于配置",
                 "/cm_download <编号或歌曲ID> [standard|higher|exhigh|lossless|hires] - 下载并发送 mp3/wav 文件，ncm 会跳过",
                 "/cm_login -phone <手机号> - 使用手机验证码登录网易云 Web 端并保存 Cookie",
+                "/cm_login -qr - 使用二维码登录网易云 Web 端并保存 Cookie",
                 "",
                 "配置项：NCM_COOKIE、DEFAULT_QUALITY、SEARCH_OUTPUT_MODE、IMAGE_BACKGROUND_URL、FONT_PATH 等。",
             ],
@@ -573,8 +595,8 @@ async def cm_help_cmd(context: CommandExecutionContext) -> CommandResponse:
 
 @plugin.mount_command(
     name="cm_login",
-    description="使用手机验证码登录网易云 Web 端",
-    usage="/cm_login -phone <手机号>",
+    description="使用手机验证码或二维码登录网易云 Web 端",
+    usage="/cm_login -phone <手机号> 或 /cm_login -qr",
     permission=CommandPermission.SUPER_USER,
     category="音乐",
 )
@@ -583,6 +605,29 @@ async def cm_login_cmd(
     query: Annotated[str, Arg("登录参数", positional=True, greedy=True)] = "",
 ) -> CommandResponse:
     try:
+        if _is_qr_login(query):
+            ctx = await AgentCtx.create_by_chat_key(context.chat_key)
+            key, qrimg = await asyncio.to_thread(create_qr_login)
+            qr_path = _save_qr_image(qrimg)
+            sandbox_path = await ctx.fs.mixed_forward_file(qr_path, file_name=qr_path.name)
+            await ctx.send_image(sandbox_path)
+            await ctx.send_text("请使用网易云音乐扫码登录，并在手机端确认。二维码 3 分钟内有效。")
+
+            for _ in range(60):
+                await asyncio.sleep(3)
+                code, message, cookie_string = await asyncio.to_thread(check_qr_login, key)
+                if code == 803 and cookie_string:
+                    _save_cookie_to_config(cookie_string)
+                    return CmdCtl.success("网易云二维码登录成功，Cookie 已自动写入 NCM_COOKIE 配置项。")
+                if code == 802:
+                    continue
+                if code == 801:
+                    continue
+                if code == 800:
+                    return CmdCtl.failed(f"二维码登录失败：{message or '二维码不存在或已过期'}")
+                return CmdCtl.failed(f"二维码登录失败：{message or code}")
+            return CmdCtl.failed("二维码登录等待超时，已取消。")
+
         phone, country_code = _parse_login_phone(query)
         error = _validate_phone(phone)
         if error:

@@ -12,6 +12,7 @@ Nekro-Agent 网易云音乐点歌插件，支持歌曲搜索、歌手相关搜�
 - 搜索结果支持文本或图片输出
 - OneBot v11 下支持 JSON 音乐卡片，失败后降级为文字、封面和语音
 - 下载并发送歌曲文件，仅发送 mp3/wav，遇到 ncm 加密格式会跳过
+- 支持手机号验证码登录和二维码登录，并自动写入 `NCM_COOKIE`
 
 ## 配置
 
@@ -43,6 +44,8 @@ Nekro-Agent 网易云音乐点歌插件，支持歌曲搜索、歌手相关搜�
 /cm_play 186016 exhigh
 /cm_play 186016 lossless
 /cm_download 186016 higher
+/cm_login -phone 13800138000
+/cm_login -qr
 ```
 
 ## 音质
@@ -99,4 +102,4 @@ fonts/font.ttf
 
 ## 说明
 
-插件运行时会通过 Nekro-Agent 的动态依赖能力安装 `NeteaseCloudMusic` SDK。该 SDK 基于 NeteaseCloudMusicApi 封装。本插件仅供学习交流使用，请遵守音乐版权相关法律法规。
+插件直接使用 `https://apis.netstart.cn/music` 提供的网易云音乐 API，不再安装 `pyncm` 或 `NeteaseCloudMusic` 动态依赖。本插件仅供学习交流使用，请遵守音乐版权相关法律法规。
