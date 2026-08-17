@@ -2,6 +2,7 @@
 
 import json
 import importlib.util
+import re
 import sys
 import time
 from importlib import import_module
@@ -23,6 +24,8 @@ _session_state = {
     "last_cookie": None,
     "load_error": None,
 }
+
+LOGIN_COOKIE_KEYS = ("MUSIC_A_T", "MUSIC_R_T", "__csrf", "MUSIC_SNS", "MUSIC_U", "NMTID")
 
 
 def _ensure_pkg_resources_compat() -> None:
@@ -190,6 +193,66 @@ def _request(api_name: str, query: Optional[dict[str, Any]] = None) -> dict[str,
     if not isinstance(result, dict):
         raise RuntimeError(f"网易云接口 {api_name} 返回格式异常")
     return result
+
+
+def _extract_cookie_value(raw_cookie: str, key: str) -> str | None:
+    if not raw_cookie:
+        return None
+    pattern = rf"(?:^|[;,\s]){re.escape(key)}=([^;,]*)"
+    match = re.search(pattern, raw_cookie)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def build_login_cookie_string(raw_cookie: str) -> str:
+    """从登录响应 Set-Cookie 中提取插件需要的网易云 Cookie 字段。"""
+    cookie_parts: list[str] = []
+    for key in LOGIN_COOKIE_KEYS:
+        value = _extract_cookie_value(raw_cookie, key)
+        if value is not None:
+            cookie_parts.append(f"{key}={value}")
+    return "; ".join(cookie_parts)
+
+
+def send_phone_captcha(phone: str, country_code: str = "86") -> dict[str, Any]:
+    """向手机号发送网易云验证码。"""
+    result = _unwrap_result(
+        _request("captcha_sent", {"phone": phone, "ctcode": country_code or "86"}),
+        "captcha_sent",
+    )
+    return result
+
+
+def login_with_phone_captcha(phone: str, captcha: str, country_code: str = "86") -> tuple[str, dict[str, Any]]:
+    """使用手机号验证码登录，并返回筛选后的 Cookie 字符串。"""
+    api = _get_api()
+    query = {
+        "phone": phone,
+        "captcha": captcha,
+        "countrycode": country_code or "86",
+        "ctcode": country_code or "86",
+        "timestamp": int(time.time() * 1000),
+    }
+    if _session_state.get("last_cookie"):
+        query["cookie"] = _session_state["last_cookie"]
+
+    result = api.call_api("/login/cellphone", query)
+    if not isinstance(result, dict):
+        raise RuntimeError("网易云登录接口返回格式异常")
+    result = _unwrap_result(result, "login_cellphone")
+
+    raw_cookie = str(result.get("cookie") or result.get("data", {}).get("cookie") or "")
+    cookie_string = build_login_cookie_string(raw_cookie)
+    cookie_dict = parse_cookie_string(cookie_string)
+    if not any(cookie_dict.get(key) for key in ("MUSIC_U", "MUSIC_A_T", "MUSIC_R_T")):
+        raise RuntimeError("登录响应未包含有效登录 Cookie，请稍后重试或改用浏览器 Cookie。")
+    if not cookie_dict.get("__csrf"):
+        logger.warning("网易云登录响应未包含 __csrf，部分接口可能需要稍后重新登录。")
+
+    _session_state["initialized"] = True
+    _session_state["last_cookie"] = cookie_string
+    return cookie_string, result
 
 
 def parse_cookie_string(cookie_string: str) -> Dict[str, str]:

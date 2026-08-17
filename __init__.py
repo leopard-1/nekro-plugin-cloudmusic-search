@@ -1,5 +1,7 @@
 """网易云音乐点歌插件"""
 
+import re
+import shlex
 import tempfile
 from pathlib import Path
 from typing import Annotated
@@ -27,10 +29,12 @@ from .ncm_api import (
     get_album_detail,
     get_song_audio_info,
     get_song_detail,
+    login_with_phone_captcha,
     normalize_quality,
     search_albums_from_ncm,
     search_artist_music_from_ncm,
     search_songs_from_ncm,
+    send_phone_captcha,
 )
 from .utils import detect_audio_extension, format_duration, parse_chat_key, safe_filename
 
@@ -206,6 +210,63 @@ def _extract_quality(raw_text: str) -> tuple[str, str]:
             continue
         kept.append(token)
     return " ".join(kept).strip(), normalize_quality(quality, config.DEFAULT_QUALITY)
+
+
+def _parse_login_phone(raw_text: str) -> tuple[str, str]:
+    try:
+        tokens = shlex.split(raw_text or "")
+    except ValueError:
+        tokens = (raw_text or "").split()
+
+    phone = ""
+    country_code = "86"
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        lower = token.lower()
+        if lower in {"-phone", "--phone", "phone"} and index + 1 < len(tokens):
+            phone = tokens[index + 1]
+            index += 2
+            continue
+        if lower.startswith("-phone=") or lower.startswith("--phone=") or lower.startswith("phone="):
+            phone = token.split("=", 1)[1]
+            index += 1
+            continue
+        if lower in {"-ctcode", "--ctcode", "-country", "--country"} and index + 1 < len(tokens):
+            country_code = tokens[index + 1]
+            index += 2
+            continue
+        if lower.startswith(("-ctcode=", "--ctcode=", "-country=", "--country=")):
+            country_code = token.split("=", 1)[1]
+            index += 1
+            continue
+        index += 1
+
+    phone = re.sub(r"\D", "", phone)
+    country_code = re.sub(r"\D", "", country_code) or "86"
+    return phone, country_code
+
+
+def _validate_phone(phone: str) -> str | None:
+    if not phone:
+        return "请输入手机号，例如：/cm_login -phone 13800138000"
+    if len(phone) < 6 or len(phone) > 20:
+        return "手机号长度不合法，请检查后重试。"
+    return None
+
+
+def _validate_captcha(captcha: str) -> str | None:
+    if not captcha:
+        return "验证码为空，已取消登录。"
+    if not captcha.isdigit() or len(captcha) < 4 or len(captcha) > 8:
+        return "验证码格式不合法，已取消登录。"
+    return None
+
+
+def _save_cookie_to_config(cookie_string: str) -> None:
+    config.NCM_COOKIE = cookie_string
+    plugin.save_config(config)
+    ensure_session_initialized(cookie_string)
 
 
 def _format_songs(title: str, songs: list[SongInfo]) -> str:
@@ -490,7 +551,7 @@ async def download_song(ctx: AgentCtx, song_id: int, quality: str = "") -> str:
     permission=CommandPermission.PUBLIC,
     category="音乐",
 )
-async def cm_help_cmd(_context: CommandExecutionContext) -> CommandResponse:
+async def cm_help_cmd(context: CommandExecutionContext) -> CommandResponse:
     return CmdCtl.success(
         "\n".join(
             [
@@ -501,11 +562,77 @@ async def cm_help_cmd(_context: CommandExecutionContext) -> CommandResponse:
                 "/cm_album <专辑ID或关键词> [text|image] - 获取专辑详情或搜索专辑",
                 "/cm_play <编号或歌曲ID> [standard|higher|exhigh|lossless|hires] - 播放歌曲，命令音质优先于配置",
                 "/cm_download <编号或歌曲ID> [standard|higher|exhigh|lossless|hires] - 下载并发送 mp3/wav 文件，ncm 会跳过",
+                "/cm_login -phone <手机号> - 使用手机验证码登录网易云 Web 端并保存 Cookie",
                 "",
                 "配置项：NCM_COOKIE、DEFAULT_QUALITY、SEARCH_OUTPUT_MODE、IMAGE_BACKGROUND_URL、FONT_PATH 等。",
             ],
         ),
     )
+
+
+@plugin.mount_command(
+    name="cm_login",
+    description="使用手机验证码登录网易云 Web 端",
+    usage="/cm_login -phone <手机号>",
+    permission=CommandPermission.SUPER_USER,
+    category="音乐",
+)
+async def cm_login_cmd(
+    context: CommandExecutionContext,
+    query: Annotated[str, Arg("登录参数", positional=True, greedy=True)] = "",
+) -> CommandResponse:
+    try:
+        phone, country_code = _parse_login_phone(query)
+        error = _validate_phone(phone)
+        if error:
+            return CmdCtl.failed(error)
+
+        result = send_phone_captcha(phone, country_code)
+        message = result.get("message") or result.get("msg") or "验证码已发送。"
+        masked_phone = f"{phone[:3]}****{phone[-4:]}" if len(phone) >= 7 else phone
+        return CmdCtl.wait(
+            f"{message}\n请在 5 分钟内直接回复 {masked_phone} 收到的短信验证码。",
+            callback_cmd="cm_login_verify",
+            timeout=300,
+            on_timeout_message="网易云登录验证码等待超时，已取消。",
+            context_data={"phone": phone, "country_code": country_code},
+        )
+    except Exception as e:
+        plugin.logger.exception(f"发送网易云登录验证码失败: {e}")
+        return CmdCtl.failed(f"发送验证码失败：{e}")
+
+
+@plugin.mount_command(
+    name="cm_login_verify",
+    description="处理网易云登录验证码",
+    permission=CommandPermission.SUPER_USER,
+    category="音乐",
+    internal=True,
+)
+async def cm_login_verify_cmd(
+    context: CommandExecutionContext,
+    captcha: Annotated[str, Arg("短信验证码", positional=True)] = "",
+    phone: str = "",
+    country_code: str = "86",
+) -> CommandResponse:
+    try:
+        captcha = (captcha or "").strip()
+        error = _validate_captcha(captcha)
+        if error:
+            return CmdCtl.failed(error)
+        error = _validate_phone(phone)
+        if error:
+            return CmdCtl.failed("登录上下文已失效，请重新发送 /cm_login -phone <手机号>。")
+
+        cookie_string, result = login_with_phone_captcha(phone, captcha, country_code)
+        _save_cookie_to_config(cookie_string)
+        profile = result.get("profile") or result.get("data", {}).get("profile") or {}
+        nickname = profile.get("nickname") if isinstance(profile, dict) else ""
+        extra = f"：{nickname}" if nickname else ""
+        return CmdCtl.success(f"网易云登录成功{extra}，Cookie 已自动写入 NCM_COOKIE 配置项。")
+    except Exception as e:
+        plugin.logger.exception(f"网易云验证码登录失败: {e}")
+        return CmdCtl.failed(f"登录失败：{e}")
 
 
 @plugin.mount_command(
