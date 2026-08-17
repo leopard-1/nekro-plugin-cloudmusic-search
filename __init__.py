@@ -7,6 +7,7 @@ import shlex
 import tempfile
 import time
 from pathlib import Path
+from collections.abc import AsyncIterator
 from typing import Annotated
 
 import httpx
@@ -21,6 +22,7 @@ from nekro_agent.api.plugin import (
     SandboxMethodType,
 )
 from nekro_agent.api.schemas import AgentCtx
+from nekro_agent.services.command.schemas import CommandOutputSegment, CommandOutputSegmentType
 from pydantic import Field
 
 from .card_api import get_cover_url, get_signed_netease_card
@@ -603,49 +605,65 @@ async def cm_help_cmd(context: CommandExecutionContext) -> CommandResponse:
 async def cm_login_cmd(
     context: CommandExecutionContext,
     query: Annotated[str, Arg("登录参数", positional=True, greedy=True)] = "",
-) -> CommandResponse:
+) -> AsyncIterator[CommandResponse]:
     try:
         if _is_qr_login(query):
-            ctx = await AgentCtx.create_by_chat_key(context.chat_key)
             key, qrimg = await asyncio.to_thread(create_qr_login)
             qr_path = _save_qr_image(qrimg)
-            sandbox_path = await ctx.fs.mixed_forward_file(qr_path, file_name=qr_path.name)
-            await ctx.send_image(sandbox_path)
-            await ctx.send_text("请使用网易云音乐扫码登录，并在手机端确认。二维码 3 分钟内有效。")
+            yield CmdCtl.message(
+                [
+                    CommandOutputSegment(
+                        type=CommandOutputSegmentType.TEXT,
+                        text="请使用网易云音乐扫码登录，并在手机端确认。二维码 3 分钟内有效。",
+                    ),
+                    CommandOutputSegment(
+                        type=CommandOutputSegmentType.IMAGE,
+                        file_path=str(qr_path),
+                        file_name=qr_path.name,
+                    ),
+                ],
+            )
 
             for _ in range(60):
                 await asyncio.sleep(3)
                 code, message, cookie_string = await asyncio.to_thread(check_qr_login, key)
                 if code == 803 and cookie_string:
                     _save_cookie_to_config(cookie_string)
-                    return CmdCtl.success("网易云二维码登录成功，Cookie 已自动写入 NCM_COOKIE 配置项。")
+                    yield CmdCtl.success("网易云二维码登录成功，Cookie 已自动写入 NCM_COOKIE 配置项。")
+                    return
                 if code == 802:
                     continue
                 if code == 801:
                     continue
                 if code == 800:
-                    return CmdCtl.failed(f"二维码登录失败：{message or '二维码不存在或已过期'}")
-                return CmdCtl.failed(f"二维码登录失败：{message or code}")
-            return CmdCtl.failed("二维码登录等待超时，已取消。")
+                    yield CmdCtl.failed(f"二维码登录失败：{message or '二维码不存在或已过期'}")
+                    return
+                yield CmdCtl.failed(f"二维码登录失败：{message or code}")
+                return
+            yield CmdCtl.failed("二维码登录等待超时，已取消。")
+            return
 
         phone, country_code = _parse_login_phone(query)
         error = _validate_phone(phone)
         if error:
-            return CmdCtl.failed(error)
+            yield CmdCtl.failed(error)
+            return
 
         result = send_phone_captcha(phone, country_code)
         message = result.get("message") or result.get("msg") or "验证码已发送。"
         masked_phone = f"{phone[:3]}****{phone[-4:]}" if len(phone) >= 7 else phone
-        return CmdCtl.wait(
+        yield CmdCtl.wait(
             f"{message}\n请在 5 分钟内直接回复 {masked_phone} 收到的短信验证码。",
             callback_cmd="cm_login_verify",
             timeout=300,
             on_timeout_message="网易云登录验证码等待超时，已取消。",
             context_data={"phone": phone, "country_code": country_code},
         )
+        return
     except Exception as e:
         plugin.logger.exception(f"发送网易云登录验证码失败: {e}")
-        return CmdCtl.failed(f"发送验证码失败：{e}")
+        yield CmdCtl.failed(f"发送验证码失败：{e}")
+        return
 
 
 @plugin.mount_command(
