@@ -32,6 +32,7 @@ Nekro-Agent 网易云音乐点歌插件，支持歌曲搜索、歌手相关搜�
 - `CARD_FALLBACK_MODE`：卡片失败时的降级模式，`voice`、`text` 或 `none`
 - `COVER_SIZE`：封面尺寸，0 表示不发送封面
 - `MAX_DOWNLOAD_MB`：下载并发送歌曲文件的最大体积
+- `PLAY_DEDUP_SECONDS`：播放请求去重秒数，默认 `12`，填 `0` 可关闭
 
 ## 命令
 

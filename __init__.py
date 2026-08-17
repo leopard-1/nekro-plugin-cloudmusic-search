@@ -170,9 +170,18 @@ class NetEaseCloudMusicConfig(ConfigBase):
         le=200,
     )
 
+    PLAY_DEDUP_SECONDS: int = Field(
+        12,
+        title="播放请求去重秒数",
+        description="同一会话内同一歌曲同一音质在该秒数内只发送一次，0 表示关闭。",
+        ge=0,
+        le=120,
+    )
+
 
 config = plugin.get_config(NetEaseCloudMusicConfig)
 _last_song_results: dict[str, list[SongInfo]] = {}
+_recent_play_requests: dict[tuple[str, int, str], float] = {}
 
 
 def _session_error() -> str | None:
@@ -186,6 +195,22 @@ def _result_limit() -> int:
 def _fallback_mode() -> str:
     mode = (config.CARD_FALLBACK_MODE or "voice").strip().lower()
     return mode if mode in {"voice", "text", "none"} else "voice"
+
+
+def _is_duplicate_play_request(chat_key: str, song_id: int, quality: str) -> bool:
+    dedup_seconds = max(0, int(config.PLAY_DEDUP_SECONDS or 0))
+    if dedup_seconds <= 0:
+        return False
+
+    now = time.monotonic()
+    expired_keys = [key for key, ts in _recent_play_requests.items() if now - ts > dedup_seconds]
+    for key in expired_keys:
+        _recent_play_requests.pop(key, None)
+
+    key = (chat_key, int(song_id), quality)
+    last_ts = _recent_play_requests.get(key)
+    _recent_play_requests[key] = now
+    return last_ts is not None and now - last_ts <= dedup_seconds
 
 
 def _output_mode(raw: str = "") -> str:
@@ -501,6 +526,12 @@ async def play_song(ctx: AgentCtx, song_id: int, quality: str = "") -> str:
         return error
 
     selected_quality = normalize_quality(quality, config.DEFAULT_QUALITY)
+    if _is_duplicate_play_request(ctx.chat_key, song_id, selected_quality):
+        plugin.logger.warning(
+            f"已忽略短时间重复播放请求: chat_key={ctx.chat_key}, song_id={song_id}, quality={selected_quality}",
+        )
+        return f"已忽略短时间内重复的播放请求：{song_id}（{selected_quality}）"
+
     song_detail = get_song_detail(song_id)
     song_name = song_detail["name"]
     artist_name = ", ".join([ar["name"] for ar in song_detail.get("ar", [])])
