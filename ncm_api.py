@@ -1,5 +1,6 @@
 """网易云音乐 API 封装，基于 NeteaseCloudMusic Python SDK。"""
 
+import json
 import importlib.util
 import sys
 import time
@@ -37,12 +38,74 @@ def _ensure_pkg_resources_compat() -> None:
 
     def resource_filename(package_or_requirement: str, resource_name: str) -> str:
         spec = importlib.util.find_spec(package_or_requirement)
+        if (not spec or not spec.submodule_search_locations) and "." in package_or_requirement:
+            spec = importlib.util.find_spec(package_or_requirement.rsplit(".", 1)[0])
         if not spec or not spec.submodule_search_locations:
             raise ModuleNotFoundError(f"No module named {package_or_requirement!r}")
         return str(Path(next(iter(spec.submodule_search_locations))) / resource_name)
 
     module.resource_filename = resource_filename
     sys.modules["pkg_resources"] = module
+
+
+def _ensure_ncm_help_compat() -> None:
+    """为缺失或失效的 NeteaseCloudMusic.help 提供兼容实现。"""
+    if "NeteaseCloudMusic.help" in sys.modules:
+        return
+
+    module = ModuleType("NeteaseCloudMusic.help")
+    exclude = {
+        "/request/reference",
+        "/avatar/upload",
+        "/cloud",
+        "/playlist/cover/update",
+        "/voice/upload",
+        "/register/anonimous",
+        "/verify/getQr",
+    }
+    config_cache: dict[str, Any] | None = None
+
+    def _load_config() -> dict[str, Any]:
+        nonlocal config_cache
+        if config_cache is not None:
+            return config_cache
+        spec = importlib.util.find_spec("NeteaseCloudMusic")
+        if not spec or not spec.submodule_search_locations:
+            config_cache = {}
+            return config_cache
+        config_path = Path(next(iter(spec.submodule_search_locations))) / "config.json"
+        try:
+            config_cache = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"读取 NeteaseCloudMusic config.json 失败: {e}")
+            config_cache = {}
+        return config_cache
+
+    def api_list() -> list[str]:
+        config = _load_config()
+        return [item for item in config if item not in exclude]
+
+    def api_help(name: str | None = None) -> str:
+        config = _load_config()
+        if name is None:
+            return "NeteaseCloudMusicApi request(apiName, queryDict)"
+        if name in api_list():
+            item = config.get(name, {})
+            return f'name: {name}\n    {item.get("name", "")}\n    {item.get("explain", "")}'
+        return f"apiName: {name} not found"
+
+    module.api_list = api_list
+    module.api_help = api_help
+    sys.modules["NeteaseCloudMusic.help"] = module
+
+
+def _clear_ncm_module_cache() -> None:
+    """清理失败导入后残留的 NeteaseCloudMusic 模块缓存，保留兼容 help 模块。"""
+    for name in list(sys.modules):
+        if name == "NeteaseCloudMusic.help":
+            continue
+        if name == "NeteaseCloudMusic" or name.startswith("NeteaseCloudMusic."):
+            sys.modules.pop(name, None)
 
 
 def _load_sdk() -> Optional[str]:
@@ -53,6 +116,7 @@ def _load_sdk() -> Optional[str]:
         return None
 
     _ensure_pkg_resources_compat()
+    _ensure_ncm_help_compat()
 
     try:
         module = import_module("NeteaseCloudMusic")
@@ -70,6 +134,8 @@ def _load_sdk() -> Optional[str]:
     errors: list[str] = []
     for package_spec, mirror in attempts:
         try:
+            _clear_ncm_module_cache()
+            _ensure_ncm_help_compat()
             module = dynamic_import_pkg(
                 package_spec,
                 import_name="NeteaseCloudMusic",
@@ -84,6 +150,8 @@ def _load_sdk() -> Optional[str]:
             errors.append(f"{package_spec} @ {mirror}: {e}")
             logger.warning(f"NeteaseCloudMusic SDK 加载失败: {package_spec} @ {mirror}: {e}")
             try:
+                _clear_ncm_module_cache()
+                _ensure_ncm_help_compat()
                 module = import_module("NeteaseCloudMusic")
                 NeteaseCloudMusicApi = module.NeteaseCloudMusicApi
                 _session_state["load_error"] = None
