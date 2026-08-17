@@ -73,6 +73,7 @@ def _ensure_ncm_help_compat() -> None:
         "/artist/top/song",
         "/captcha/sent",
         "/captcha/verify",
+        "/cloudsearch",
         "/login/cellphone",
         "/search",
         "/song/detail",
@@ -209,6 +210,15 @@ def _request(api_name: str, query: Optional[dict[str, Any]] = None) -> dict[str,
     if not isinstance(result, dict):
         raise RuntimeError(f"网易云接口 {api_name} 返回格式异常")
     return result
+
+
+def _search_result(keyword: str, search_type: int, max_results: int) -> dict[str, Any]:
+    query = {"keywords": keyword, "type": search_type, "limit": max_results, "offset": 0}
+    try:
+        return _unwrap_result(_request("cloudsearch", query), "cloudsearch")
+    except Exception as e:
+        logger.warning(f"网易云 cloudsearch 失败，回退旧搜索接口: {e}")
+        return _unwrap_result(_request("search", query), "search")
 
 
 def _extract_cookie_value(raw_cookie: str, key: str) -> str | None:
@@ -415,10 +425,7 @@ def search_songs_from_ncm(
     default_cover_url: str,
 ) -> List[SongInfo]:
     """从网易云音乐搜索歌曲。"""
-    result = _unwrap_result(
-        _request("search", {"keywords": keyword, "type": 1, "limit": max_results, "offset": 0}),
-        "search",
-    )
+    result = _search_result(keyword, 1, max_results)
     songs_data: List[Dict[str, Any]] = result.get("result", {}).get("songs", [])
     if not songs_data:
         raise ValueError(f"未找到与'{keyword}'相关的歌曲")
@@ -441,10 +448,7 @@ def search_albums_from_ncm(
     default_cover_url: str,
 ) -> List[AlbumInfo]:
     """从网易云音乐搜索专辑。"""
-    result = _unwrap_result(
-        _request("search", {"keywords": keyword, "type": 10, "limit": max_results, "offset": 0}),
-        "search",
-    )
+    result = _search_result(keyword, 10, max_results)
     albums_data: List[Dict[str, Any]] = result.get("result", {}).get("albums", [])
     if not albums_data:
         raise ValueError(f"未找到与'{keyword}'相关的专辑")
@@ -471,10 +475,7 @@ def search_artist_music_from_ncm(
     songs: list[SongInfo] = []
     albums: list[AlbumInfo] = []
 
-    artist_result = _unwrap_result(
-        _request("search", {"keywords": artist_keyword, "type": 100, "limit": 3, "offset": 0}),
-        "search",
-    )
+    artist_result = _search_result(artist_keyword, 100, 3)
     artists = artist_result.get("result", {}).get("artists", [])
     if artists:
         artist_id = artists[0].get("id")
