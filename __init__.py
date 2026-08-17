@@ -35,6 +35,7 @@ from .ncm_api import (
     search_artist_music_from_ncm,
     search_songs_from_ncm,
     send_phone_captcha,
+    verify_phone_captcha,
 )
 from .utils import detect_audio_extension, format_duration, parse_chat_key, safe_filename
 
@@ -624,6 +625,7 @@ async def cm_login_verify_cmd(
         if error:
             return CmdCtl.failed("登录上下文已失效，请重新发送 /cm_login -phone <手机号>。")
 
+        verify_phone_captcha(phone, captcha, country_code)
         cookie_string, result = login_with_phone_captcha(phone, captcha, country_code)
         _save_cookie_to_config(cookie_string)
         profile = result.get("profile") or result.get("data", {}).get("profile") or {}

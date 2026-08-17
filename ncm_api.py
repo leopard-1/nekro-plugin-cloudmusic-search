@@ -26,6 +26,7 @@ _session_state = {
 }
 
 LOGIN_COOKIE_KEYS = ("MUSIC_A_T", "MUSIC_R_T", "__csrf", "MUSIC_SNS", "MUSIC_U", "NMTID")
+DEFAULT_REAL_IP = "116.25.146.177"
 
 
 def _ensure_pkg_resources_compat() -> None:
@@ -218,8 +219,25 @@ def build_login_cookie_string(raw_cookie: str) -> str:
 def send_phone_captcha(phone: str, country_code: str = "86") -> dict[str, Any]:
     """向手机号发送网易云验证码。"""
     result = _unwrap_result(
-        _request("captcha_sent", {"phone": phone, "ctcode": country_code or "86"}),
+        _request("captcha_sent", {"phone": phone, "ctcode": country_code or "86", "realIP": DEFAULT_REAL_IP}),
         "captcha_sent",
+    )
+    return result
+
+
+def verify_phone_captcha(phone: str, captcha: str, country_code: str = "86") -> dict[str, Any]:
+    """校验网易云短信验证码，便于把验证码错误和登录风控区分开。"""
+    result = _unwrap_result(
+        _request(
+            "captcha_verify",
+            {
+                "phone": phone,
+                "captcha": captcha,
+                "ctcode": country_code or "86",
+                "realIP": DEFAULT_REAL_IP,
+            },
+        ),
+        "captcha_verify",
     )
     return result
 
@@ -233,7 +251,7 @@ def login_with_phone_captcha(phone: str, captcha: str, country_code: str = "86")
         "countrycode": country_code or "86",
         "ctcode": country_code or "86",
         "cookie": parse_cookie_string(str(_session_state.get("last_cookie") or "")),
-        "realIP": getattr(api, "ip", "116.25.146.177") or "116.25.146.177",
+        "realIP": DEFAULT_REAL_IP,
         "timestamp": int(time.time() * 1000),
     }
 
