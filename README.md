@@ -35,11 +35,11 @@ Nekro-Agent 网易云音乐点歌插件，支持歌曲搜索、歌手相关搜�
 ## 命令
 
 ```text
-/cm_help
-/cm_search 晴天
-/cm_search 晴天 image
-/cm_play 1
-/cm_artist 周杰伦
+/cm_help 
+/cm_search 晴天 
+/cm_search 晴天 
+/cm_play 1 
+/cm_artist 周杰伦 
 /cm_artist 陈奕迅 text
 /cm_album 35327877
 /cm_album 叶惠美 image
@@ -103,4 +103,6 @@ fonts/font.ttf
 
 ## 说明
 
-插件直接使用 `https://apis.netstart.cn/music` 提供的网易云音乐 API，不再安装 `pyncm` 或 `NeteaseCloudMusic` 动态依赖。本插件仅供学习交流使用，请遵守音乐版权相关法律法规。
+插件直接使用 `https://apis.netstart.cn/music` 提供的网易云音乐 API
+
+该项目遵循`MIT协议`
