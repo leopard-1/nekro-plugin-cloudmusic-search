@@ -10,7 +10,6 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated
 
-import httpx
 from nekro_agent.api.plugin import (
     Arg,
     CmdCtl,
@@ -44,7 +43,7 @@ from .ncm_api import (
     send_phone_captcha,
     verify_phone_captcha,
 )
-from .utils import detect_audio_extension, format_duration, parse_chat_key, safe_filename
+from .utils import format_duration, parse_chat_key
 
 
 plugin = NekroPlugin(
@@ -123,7 +122,7 @@ class NetEaseCloudMusicConfig(ConfigBase):
     MAX_SEARCH_RESULTS: int = Field(
         20,
         title="最大搜索结果数",
-        description="歌曲或专辑列表显示数量，最多 20 条。搜索后可用编号播放或下载。",
+        description="歌曲或专辑列表显示数量，最多 20 条。搜索后可用编号播放。",
         ge=1,
         le=20,
     )
@@ -160,14 +159,6 @@ class NetEaseCloudMusicConfig(ConfigBase):
         description="发送封面图片的尺寸，0 表示不发送封面。",
         ge=0,
         le=1000,
-    )
-
-    MAX_DOWNLOAD_MB: int = Field(
-        30,
-        title="最大下载文件大小(MB)",
-        description="下载并发送歌曲文件的最大体积，避免误发过大的音频。",
-        ge=1,
-        le=200,
     )
 
     PLAY_DEDUP_SECONDS: int = Field(
@@ -349,7 +340,7 @@ def _save_qr_image(qrimg: str) -> Path:
 def _format_songs(title: str, songs: list[SongInfo]) -> str:
     if not songs:
         return f"{title}\n\n没有找到歌曲。"
-    lines = [title, "", "可用 /cm_play 编号 播放，或 /cm_download 编号 下载。", ""]
+    lines = [title, "", "可用 /cm_play 编号 播放。", ""]
     for index, song in enumerate(songs, start=1):
         lines.append(f"{index}. {song.name} - {song.artist}")
         lines.append(f"   专辑：{song.album} | 时长：{format_duration(song.duration)} | ID：{song.id}")
@@ -431,35 +422,6 @@ def _parse_song_id(raw_text: str, chat_key: str = "") -> int:
     if value <= 20 and cached:
         raise ValueError(f"最近一次搜索只有 {len(cached)} 条结果，无法选择编号 {value}。")
     return value
-
-
-async def _download_audio_file(song_id: int, quality: str) -> tuple[Path, str, str]:
-    detail = get_song_detail(song_id)
-    song_name = detail.get("name") or str(song_id)
-    artist_name = ", ".join([ar["name"] for ar in detail.get("ar", []) if isinstance(ar, dict)]) or "未知歌手"
-    audio = get_song_audio_info(song_id, quality, config.DEFAULT_QUALITY)
-
-    if audio.extension == "ncm":
-        raise ValueError("网易云返回的是加密 ncm 格式，已按要求跳过发送。")
-
-    async with httpx.AsyncClient(timeout=config.HTTP_TIMEOUT, follow_redirects=True) as client:
-        response = await client.get(audio.url)
-        response.raise_for_status()
-
-    ext = detect_audio_extension(str(response.url), response.headers.get("content-type", "")) or audio.extension
-    if ext == "ncm":
-        raise ValueError("网易云返回的是加密 ncm 格式，已按要求跳过发送。")
-    if ext not in {"mp3", "wav"}:
-        raise ValueError(f"仅支持发送 mp3/wav，当前识别到的格式为：{ext or '未知'}")
-
-    max_bytes = int(config.MAX_DOWNLOAD_MB) * 1024 * 1024
-    if len(response.content) > max_bytes:
-        raise ValueError(f"音频文件超过 {config.MAX_DOWNLOAD_MB} MB，已取消发送。")
-
-    filename = f"{safe_filename(song_name)} - {safe_filename(artist_name)}.{ext}"
-    path = Path(tempfile.gettempdir()) / filename
-    path.write_bytes(response.content)
-    return path, song_name, artist_name
 
 
 @plugin.mount_sandbox_method(SandboxMethodType.AGENT, "搜索网易云歌曲")
@@ -618,19 +580,6 @@ async def play_song(ctx: AgentCtx, song_id: int, quality: str = "") -> str:
     return f"歌曲《{song_name}》已发送，音质：{audio.quality}"
 
 
-@plugin.mount_sandbox_method(SandboxMethodType.TOOL, "下载并发送网易云歌曲文件")
-async def download_song(ctx: AgentCtx, song_id: int, quality: str = "") -> str:
-    """下载并发送歌曲文件，仅发送 mp3/wav；ncm 加密格式会跳过"""
-    error = _session_error()
-    if error:
-        return error
-    selected_quality = normalize_quality(quality, config.DEFAULT_QUALITY)
-    path, song_name, artist_name = await _download_audio_file(song_id, selected_quality)
-    sandbox_path = await ctx.fs.mixed_forward_file(path, file_name=path.name)
-    await ctx.send_file(sandbox_path)
-    return f"已发送歌曲文件：{song_name} - {artist_name}"
-
-
 @plugin.mount_command(
     name="cm_help",
     description="查看网易云点歌插件帮助",
@@ -648,7 +597,6 @@ async def cm_help_cmd(context: CommandExecutionContext) -> CommandResponse:
                 "/cm_artist <歌手> [text|image] - 按歌手搜索相关歌曲和专辑，最多各 20 条",
                 "/cm_album <专辑ID或关键词> [text|image] - 获取专辑详情或搜索专辑",
                 "/cm_play <编号或歌曲ID> [standard|higher|exhigh|lossless|hires] - 播放歌曲，命令音质优先于配置",
-                "/cm_download <编号或歌曲ID> [standard|higher|exhigh|lossless|hires] - 下载并发送 mp3/wav 文件，ncm 会跳过",
                 "/cm_login -phone <手机号> - 使用手机验证码登录网易云 Web 端并保存 Cookie",
                 "/cm_login -qr - 使用二维码登录网易云 Web 端并保存 Cookie",
                 "",
@@ -866,29 +814,6 @@ async def cm_play_cmd(
     except Exception as e:
         plugin.logger.exception(f"播放歌曲失败: {e}")
         return CmdCtl.failed(f"播放歌曲失败：{e}")
-
-
-@plugin.mount_command(
-    name="cm_download",
-    description="下载并发送网易云歌曲文件",
-    aliases=["下载歌曲", "发歌曲文件"],
-    usage="/cm_download <歌曲ID> [standard|higher|exhigh|lossless|hires]",
-    permission=CommandPermission.PUBLIC,
-    category="音乐",
-)
-async def cm_download_cmd(
-    context: CommandExecutionContext,
-    query: Annotated[str, Arg("歌曲 ID 和可选音质", positional=True, greedy=True)] = "",
-) -> CommandResponse:
-    try:
-        cleaned_query, quality = _extract_quality(query)
-        ctx = await AgentCtx.create_by_chat_key(context.chat_key)
-        song_id = _parse_song_id(cleaned_query, ctx.chat_key)
-        text = await download_song(ctx, song_id, quality)
-        return CmdCtl.success(text)
-    except Exception as e:
-        plugin.logger.exception(f"下载歌曲失败: {e}")
-        return CmdCtl.failed(f"下载歌曲失败：{e}")
 
 
 @plugin.mount_cleanup_method()

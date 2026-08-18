@@ -1,11 +1,6 @@
 """工具函数模块"""
 
-import re
-from pathlib import Path
 from typing import Tuple
-from urllib.parse import urlparse
-
-from nekro_agent.core import logger
 
 
 def parse_chat_key(chat_key: str) -> Tuple[str, int]:
@@ -62,27 +57,3 @@ def format_duration(milliseconds: int) -> str:
     if hours > 0:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
-
-
-def safe_filename(name: str, fallback: str = "cloudmusic") -> str:
-    """生成适合保存到文件系统的文件名"""
-    cleaned = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", str(name or "").strip())
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
-    return cleaned[:80] or fallback
-
-
-def detect_audio_extension(url: str, content_type: str = "") -> str:
-    """从 URL 或 Content-Type 识别允许发送的音频格式"""
-    path = urlparse(url).path.lower()
-    ext = Path(path).suffix.lstrip(".")
-    if ext in {"mp3", "wav", "ncm"}:
-        return ext
-
-    content = content_type.lower()
-    if "mpeg" in content or "mp3" in content:
-        return "mp3"
-    if "wav" in content or "wave" in content:
-        return "wav"
-    if "ncm" in content:
-        return "ncm"
-    return ""

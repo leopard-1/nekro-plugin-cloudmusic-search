@@ -1,6 +1,6 @@
 # 网易云点歌插件
 
-Nekro-Agent 网易云音乐点歌插件，支持歌曲搜索、歌手相关搜索、专辑查询、可选音质播放，以及下载并发送歌曲文件。
+Nekro-Agent 网易云音乐点歌插件，支持歌曲搜索、歌手相关搜索、专辑查询、可选音质播放。
 
 ## 功能
 
@@ -11,7 +11,6 @@ Nekro-Agent 网易云音乐点歌插件，支持歌曲搜索、歌手相关搜�
 - 配置默认音质，用户命令或会话里指定音质时优先
 - 搜索结果支持文本或图片输出
 - OneBot v11 下支持 JSON 音乐卡片，失败后降级为文字、封面和语音
-- 下载并发送歌曲文件，仅发送 mp3/wav，遇到 ncm 加密格式会跳过
 - 支持手机号验证码登录和二维码登录，并自动写入 `NCM_COOKIE`
 
 ## 配置
@@ -31,7 +30,6 @@ Nekro-Agent 网易云音乐点歌插件，支持歌曲搜索、歌手相关搜�
 - `ENABLE_JSON_CARD`：是否启用 OneBot JSON 音乐卡片
 - `CARD_FALLBACK_MODE`：卡片失败时的降级模式，`voice`、`text` 或 `none`
 - `COVER_SIZE`：封面尺寸，0 表示不发送封面
-- `MAX_DOWNLOAD_MB`：下载并发送歌曲文件的最大体积
 - `PLAY_DEDUP_SECONDS`：播放请求去重秒数，默认 `12`，填 `0` 可关闭
 
 ## 命令
@@ -48,7 +46,6 @@ Nekro-Agent 网易云音乐点歌插件，支持歌曲搜索、歌手相关搜�
 /cm_play 186016 standard
 /cm_play 186016 exhigh
 /cm_play 186016 lossless
-/cm_download 186016 higher
 /cm_login -phone 13800138000
 /cm_login -qr
 ```
@@ -71,7 +68,6 @@ Nekro-Agent 网易云音乐点歌插件，支持歌曲搜索、歌手相关搜�
 
 ```text
 /cm_play 1
-/cm_download 2
 ```
 
 如果输入大于 20 的数字，会按网易云歌曲 ID 处理。
